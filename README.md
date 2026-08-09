@@ -4,6 +4,8 @@ Find the Python dependencies you barely use.
 
 Most tools tell you what's unused. scant also tells you what's barely used — a dependency pulled in for one function, called on a couple of lines, that's probably not worth carrying.
 
+Built for plain English: flags are spelled out in full (`--threshold-lines`, not `-L`), and every result or error reads in words a non-developer can follow — no jargon, no stack traces.
+
 **Status:** pre-alpha, targeting v0.0.1. See [PLAN.md](PLAN.md).
 
 ## Install
@@ -15,7 +17,7 @@ Not yet published.
 ## Usage
 
     scant .
-    scant . --max-lines 5
+    scant . --threshold-lines 5
 
 ## Example output
 

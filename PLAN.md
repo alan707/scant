@@ -173,9 +173,9 @@ scant explain <DEP>    # why is this flagged? where is it used?
 
 ### Flags
 **Thresholds — "how little is too little?"**
-- `--max-lines <N>` — used on N or fewer lines (default `3`)
-- `--max-files <M>` — …and in M or fewer files (default `2`)
-- `--max-symbols <K>` — …and K or fewer distinct symbols (default `1`)
+- `--threshold-lines <N>` — used on N or fewer lines (default `3`)
+- `--threshold-files <M>` — …and in M or fewer files (default `2`)
+- `--threshold-symbols <K>` — …and K or fewer distinct symbols (default `1`)
 - A dep is "lightly used" when below **all** active thresholds (AND, not OR — document this).
 
 **Scanning:** `--exclude <GLOB>` (repeatable, gitignore syntax), `--exclude-from <FILE>`, `--extend-exclude <GLOB>` (adds to defaults instead of replacing), `--no-respect-gitignore`
@@ -187,9 +187,9 @@ scant explain <DEP>    # why is this flagged? where is it used?
 ### Config (`pyproject.toml`)
 ```toml
 [tool.scant]
-max-lines = 3
-max-files = 2
-max-symbols = 1
+threshold-lines = 3
+threshold-files = 2
+threshold-symbols = 1
 target-version = "3.11"
 exclude = ["**/migrations/"]
 ignore-dependencies = ["types-requests", "tzdata"]
@@ -216,9 +216,9 @@ USAGE
   scant explain <DEP>       show exactly where and how a dependency is used
 
 THRESHOLDS  (what counts as "barely used")
-  --max-lines <N>             flag deps used on N or fewer lines      [default: 3]
-  --max-files <M>             ...and in M or fewer files              [default: 2]
-  --max-symbols <K>           ...and importing K or fewer names       [default: 1]
+  --threshold-lines <N>       flag deps used on N or fewer lines      [default: 3]
+  --threshold-files <M>       ...and in M or fewer files              [default: 2]
+  --threshold-symbols <K>     ...and importing K or fewer names       [default: 1]
 
 SCANNING
   --exclude <GLOB>            skip paths (gitignore syntax, repeatable)
@@ -237,7 +237,7 @@ OUTPUT
 
 EXAMPLES
   scant                            # analyze the current project
-  scant --max-lines 5              # be stricter about "barely used"
+  scant --threshold-lines 5        # be stricter about "barely used"
   scant explain prophet            # why is 'prophet' flagged?
   scant path/to/project --format json
 
@@ -477,7 +477,7 @@ Superset's `prophet` (2 lines, enormous install, pulls Stan) sits squarely botto
 - [ ] Zero false positives on mkdocs; Superset's FP classes all correctly categorized
 - [ ] Excludes can never *silently* turn a used dep into "unused"
 - [ ] pip-compile files never diffed as if hand-written
-- [ ] `--max-lines` and friends demonstrably change results
+- [ ] `--threshold-lines` and friends demonstrably change results
 - [ ] Correct stdlib classification across 3.9–3.14 (`distutils` test passes both ways)
 - [ ] clippy/fmt clean; tests pass on Linux/macOS/Windows
 - [ ] README lets a stranger understand and run the tool in two minutes
