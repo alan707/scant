@@ -4,7 +4,7 @@
 
 > **How to use this file with Claude Code:** work **phase by phase**. Each phase has explicit *Acceptance Criteria* that must pass before the next begins. Prefer the narrow, correct version over the broad, clever one.
 
-> **Status:** the algorithm in this plan has been **prototyped in Python and validated against 8 real repositories** (see §14). The findings — including four classes of false positive discovered in the wild — are folded into the design below. `proto.py` ships alongside this plan as a test oracle.
+> **Status:** the algorithm in this plan has been **prototyped in Python and validated against 8 real repositories** (see §14). The findings — including four classes of false positive discovered in the wild — are folded into the design below.
 
 ---
 
@@ -368,7 +368,6 @@ Each of these was **observed in the wild** by the prototype and must be handled:
 - `insta` snapshots on rendered text (locks the ASCII).
 - `assert_cmd`/`trycmd` for exit codes, `--help`, JSON shape.
 - `criterion` + `hyperfine`; **fail CI on >20% regression** against the Superset baseline.
-- **Differential test vs `proto.py`** — run both on mkdocs and diff. The prototype's known-wrong outputs are documented expectations.
 - CI matrix: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on Linux/macOS/Windows + maturin wheel build.
 
 ---
@@ -461,9 +460,7 @@ Superset's `prophet` (2 lines, enormous install, pulls Stan) sits squarely botto
 
 ## 14. Prototype validation (already done)
 
-`proto.py` (shipped with this plan) implements the algorithm in Python: manifest parsing, `ast`-based import extraction with binding tracking, two-pass usage counting, and the unused/light classification. It was run against pelican, mkdocs, beets, locust, superset, nova, edx-platform, and zulip.
-
-**Keep it as a test oracle.** Diffing the Rust implementation against it on mkdocs gives an immediate correctness check, and its *known-wrong* outputs are exactly the §11c fixture expectations.
+The algorithm was prototyped in Python — manifest parsing, `ast`-based import extraction with binding tracking, two-pass usage counting, and the unused/light classification — and run against pelican, mkdocs, beets, locust, superset, nova, edx-platform, and zulip to validate the design before committing to the Rust implementation. The prototype itself was a scratch script, not shipped in this repo; its findings are captured as the §11c fixture expectations instead.
 
 **What validation bought us:** the entry-point category, the pip-compile trap, the scan-tests-by-default rule, the ~20% heuristic FP rate, the 3.0s performance baseline, and a set of headline findings that make the README compelling.
 

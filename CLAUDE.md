@@ -20,7 +20,7 @@ Pre-alpha. No code yet. **We are on Phase 0** (scaffold). Do not skip ahead — 
 
 - **Work phase by phase.** Stop at the end of each phase and confirm acceptance criteria before continuing.
 - **Prefer the narrow correct version over the broad clever one.** Phase 1 supports exactly one manifest format and one repo. That is deliberate.
-- **Don't relitigate settled decisions.** The "Non-negotiables" below were decided with evidence (see `proto.py` and PLAN.md §14). If you think one is wrong, say so explicitly and wait — don't silently do something else.
+- **Don't relitigate settled decisions.** The "Non-negotiables" below were decided with evidence (see PLAN.md §14). If you think one is wrong, say so explicitly and wait — don't silently do something else.
 - **All logic goes in `scant-core`**, testable without a terminal. `scant-cli` only parses args, loads config, calls core, prints, sets exit codes.
 - **Never panic on user input.** Panics are for internal bugs only, and should tell the user to file an issue.
 
@@ -80,7 +80,6 @@ cargo run -- <path>             # run the CLI
 - Fixture projects in `tests/fixtures/`, one trait each — see PLAN.md §11b.
 - **The false-positive taxonomy in PLAN.md §11c is real, observed data.** Each row has a named specimen from a real repo. These are regression tests, not hypotheticals.
 - `insta` snapshots lock the output formatting.
-- `proto.py` (repo root) is a **test oracle** — the Python prototype of this algorithm, validated against 8 real repos. Diff the Rust output against it on mkdocs. Its *known-wrong* outputs are the documented fixture expectations.
 
 ## Validation repos
 
