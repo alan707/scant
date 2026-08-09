@@ -23,15 +23,16 @@ jobs:
       - run: cargo test --workspace
 
   smoke-test:
-    name: Smoke test (mkdocs)
+    name: Smoke test (Superset)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: git clone --depth 1 https://github.com/mkdocs/mkdocs.git /tmp/mkdocs
-      - name: Run scant against mkdocs
+      - run: git clone --depth 1 https://github.com/apache/superset.git /tmp/superset
+      - run: cargo build --release --quiet
+      - name: Run scant against Superset
         run: |
-          output=$(cargo run --quiet -- /tmp/mkdocs)
+          output=$(./target/release/scant /tmp/superset)
           echo "$output"
-          echo "$output" | grep -qE "scanned [1-9][0-9]* files" || (echo "::error::scant reported zero files scanned against a real repo (mkdocs)" && exit 1)
+          echo "$output" | grep -qE "scanned [1-9][0-9]* files" || (echo "::error::scant reported zero files scanned against a real repo (Superset)" && exit 1)
