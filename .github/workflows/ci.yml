@@ -21,3 +21,17 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
       - run: cargo test --workspace
+
+  smoke-test:
+    name: Smoke test (mkdocs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: git clone --depth 1 https://github.com/mkdocs/mkdocs.git /tmp/mkdocs
+      - name: Run scant against mkdocs
+        run: |
+          output=$(cargo run --quiet -- /tmp/mkdocs)
+          echo "$output"
+          echo "$output" | grep -qE "scanned [1-9][0-9]* files" || (echo "::error::scant reported zero files scanned against a real repo (mkdocs)" && exit 1)
