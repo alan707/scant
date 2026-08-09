@@ -1,0 +1,12 @@
+[package]
+name = "scant-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "scant"
+path = "src/main.rs"
+
+[dependencies]
+scant-core = { path = "../scant-core" }
