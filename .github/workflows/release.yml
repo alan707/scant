@@ -1,0 +1,261 @@
+name: Release
+
+# Manual-only: the PyPI trusted publisher's environment (`publish`) is branch-restricted to
+# `main`, and a tag-push ref is not `refs/heads/main` -- so this can never be `on: push: tags:`.
+# A human explicitly runs this from the Actions tab against `main`.
+#
+# This workflow never commits a version-bump to `main`. The repo's branch ruleset requires every
+# change to `main` -- including one from a workflow's GITHUB_TOKEN -- to go through a PR that
+# passes CodeQL, with no bypass actors at all (verified via `gh api
+# repos/alan707/scant/rulesets`). So instead: the `tag` job patches Cargo.toml/Cargo.lock/
+# pyproject.toml locally, hands that patched tree to the `build` job as a workflow artifact (used
+# in both dry-run and real mode), and creates the git tag + GitHub Release directly (tags aren't
+# covered by the branch-only ruleset, so this needs no bypass). The committed version fields in
+# Cargo.toml/pyproject.toml are not auto-advanced by this workflow -- bump them in a normal PR
+# whenever you like, independent of releasing.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >
+          PEP 440 version to publish, e.g. 0.0.1a0 (alpha), 0.0.1b0 (beta), 0.0.1rc0 (release
+          candidate), or 1.0.0 (final). Must already be in canonical PEP 440 form - this workflow
+          does not guess or normalize alternate spellings (it will reject e.g. "0.0.1-alpha").
+        required: true
+        type: string
+      dry_run:
+        description: >
+          Run the full cross-platform build matrix and validate everything, but skip creating
+          the tag/GitHub Release and skip the final PyPI publish step. Defaults to true because a
+          real publish to PyPI is a one-time, irreversible action -- flip to false deliberately.
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Validate version, create tag + release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      pep440_version: ${{ steps.version.outputs.pep440_version }}
+      cargo_version: ${{ steps.version.outputs.cargo_version }}
+      git_tag: ${{ steps.version.outputs.git_tag }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Validate PEP 440 version and derive Cargo semver
+        id: version
+        run: |
+          pip install --quiet --disable-pip-version-check packaging
+          python3 - <<'PYEOF'
+          import os, sys
+          from packaging.version import Version, InvalidVersion
+
+          raw = "${{ inputs.version }}"
+          try:
+              v = Version(raw)
+          except InvalidVersion as e:
+              print(f"::error::'{raw}' is not a valid PEP 440 version: {e}")
+              sys.exit(1)
+
+          if str(v) != raw:
+              print(f"::error::'{raw}' is not canonical PEP 440. Did you mean '{v}'? "
+                    "Use the canonical spelling (e.g. 0.0.1a0, not 0.0.1-alpha) so there is no "
+                    "ambiguity between what was requested and what gets published.")
+              sys.exit(1)
+
+          if v.epoch or v.post is not None or v.dev is not None or v.local is not None:
+              print(f"::error::Only plain releases (X.Y.Z) and simple pre-releases "
+                    f"(X.Y.ZaN / X.Y.ZbN / X.Y.ZrcN) are supported by this workflow. "
+                    f"'{raw}' uses an epoch/post/dev/local segment.")
+              sys.exit(1)
+
+          if len(v.release) != 3:
+              print(f"::error::Expected a 3-part release (X.Y.Z); got '{raw}'.")
+              sys.exit(1)
+
+          release = ".".join(str(p) for p in v.release)
+          if v.pre is None:
+              cargo_version = release
+          else:
+              phase, n = v.pre  # 'a' | 'b' | 'rc'
+              cargo_version = f"{release}-{phase}.{n}"
+
+          is_prerelease = "true" if v.pre is not None else "false"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"pep440_version={raw}\n")
+              f.write(f"cargo_version={cargo_version}\n")
+              f.write(f"git_tag=v{raw}\n")
+              f.write(f"is_prerelease={is_prerelease}\n")
+
+          print(f"PEP 440 version : {raw}")
+          print(f"Cargo version   : {cargo_version}")
+          print(f"Git tag         : v{raw}")
+          print(f"Prerelease      : {is_prerelease}")
+          PYEOF
+
+      - name: Refuse to re-publish an existing version
+        run: |
+          TAG="${{ steps.version.outputs.git_tag }}"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "::error::Tag $TAG already exists. Refusing to overwrite a version that may already be released."
+            exit 1
+          fi
+          # Best-effort extra check against PyPI's public, read-only JSON API (never an upload
+          # endpoint), in case a tag was ever deleted after a real publish.
+          if curl -fsS "https://pypi.org/pypi/scant/json" 2>/dev/null | \
+             python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if '${{ steps.version.outputs.pep440_version }}' in d.get('releases', {}) else 1)"; then
+            echo "::error::${{ steps.version.outputs.pep440_version }} is already published on PyPI."
+            exit 1
+          fi
+
+      - name: Patch Cargo.toml and pyproject.toml locally (not committed to main)
+        run: |
+          pip install --quiet --disable-pip-version-check tomlkit
+          python3 - <<'PYEOF'
+          import tomlkit
+
+          cargo_version = "${{ steps.version.outputs.cargo_version }}"
+          pep440_version = "${{ steps.version.outputs.pep440_version }}"
+
+          with open("Cargo.toml") as f:
+              doc = tomlkit.parse(f.read())
+          doc["workspace"]["package"]["version"] = cargo_version
+          with open("Cargo.toml", "w") as f:
+              f.write(tomlkit.dumps(doc))
+
+          with open("pyproject.toml") as f:
+              doc = tomlkit.parse(f.read())
+          doc["project"]["version"] = pep440_version
+          with open("pyproject.toml", "w") as f:
+              f.write(tomlkit.dumps(doc))
+          PYEOF
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Refresh Cargo.lock for the version bump
+        # Deliberately `cargo check`, not `cargo update`: this only needs to rewrite the version
+        # fields Cargo.lock already tracks for the two local workspace members (scant-core,
+        # scant-cli). `cargo update` would be free to bump external dependency versions too,
+        # which is unrelated to a version release and not something this workflow should ever do
+        # silently.
+        run: cargo check --workspace --quiet
+
+      - name: Upload patched manifests for the build matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: version-manifests
+          path: |
+            Cargo.toml
+            Cargo.lock
+            pyproject.toml
+          retention-days: 1
+
+      - name: Create tag and GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.version.outputs.git_tag }}"
+          PRERELEASE_FLAG=""
+          if [ "${{ steps.version.outputs.is_prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "$TAG" \
+            --target main \
+            --title "$TAG" \
+            --notes "Release ${{ steps.version.outputs.pep440_version }}." \
+            $PRERELEASE_FLAG
+
+      - name: Dry run - report what would happen
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "DRY RUN: would create tag ${{ steps.version.outputs.git_tag }} and a GitHub Release targeting main."
+          echo "DRY RUN: no tag or release was created. The build matrix still runs against the patched manifests to validate the pipeline end to end."
+
+  build:
+    name: Build wheels (${{ matrix.platform.name }})
+    needs: tag
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+            args: --release --sdist --compatibility pypi
+          - name: linux-aarch64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
+            args: --release --compatibility pypi
+          - name: macos-universal2
+            runner: macos-latest
+            target: universal2-apple-darwin
+            manylinux: ""
+            args: --release
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: ""
+            args: --release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Apply patched manifests from the tag job
+        uses: actions/download-artifact@v8
+        with:
+          name: version-manifests
+
+      - if: matrix.platform.name == 'macos-universal2'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - if: matrix.platform.name == 'windows-x86_64'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: v1.14.1
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+          args: ${{ matrix.platform.args }} --locked --out dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.platform.name }}
+          path: dist
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment: publish
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist

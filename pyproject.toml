@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "scant"
+version = "0.0.1"
+description = "Find the Python dependencies you barely use."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/scant-cli/Cargo.toml"
+strip = true
