@@ -12,3 +12,6 @@ target/
 # Environments
 .env
 .envrc
+
+# Internal design doc -- not for the public repo
+PLAN.md
