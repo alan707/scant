@@ -164,7 +164,7 @@ def report(name, root, max_lines=3, max_files=2, max_symbols=1):
             print(f"    {d:<28} {nf}f · {ns}sym · {nl}ln   {where}")
 
 if __name__ == "__main__":
-    base = Path("/home/claude/candidates")
+    base = Path("/home/user/candidates")
     names = sys.argv[1:] or ["pelican", "mkdocs", "beets", "locust"]
     for name in names:
         report(name, base / name)
