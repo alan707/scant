@@ -7,3 +7,11 @@ version = "0.0.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/alan707/scant"
+
+[workspace.dependencies]
+# Not published as a stable crates.io API -- pin to the latest tagged ruff release.
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff.git", tag = "0.16.2" }
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff.git", tag = "0.16.2" }
+ignore = "0.4.33"
+rayon = "1.12.0"
+clap = { version = "4.6.6", features = ["derive"] }
