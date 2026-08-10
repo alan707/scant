@@ -1,0 +1,33 @@
+---
+source: crates/scant-core/src/report.rs
+expression: rendered
+---
+  scant · mkdocs          3 deps · 39 files · 0.01s
+  ──────────────────────────────────────────────────────────────────
+
+  DROP?          never imported                             1
+
+    bottleneck
+      imports:    1
+      files:      1
+      lines:      1
+      usage:      none
+      verdict:    drop
+
+  INLINE?        one symbol, a few lines                    1
+
+    colorama
+      imports:    1
+      files:      1
+      lines:      1
+      usage:      trivial
+      verdict:    inline
+
+  KEEP           earning their place                        1
+
+    requests
+      imports:    1
+      files:      1
+      lines:      1
+      usage:      heavy
+      verdict:    keep

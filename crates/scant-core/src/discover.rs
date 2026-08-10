@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -20,25 +21,65 @@ const DENYLIST: &[&str] = &[
     ".eggs",
 ];
 
+fn is_denied(name: &str) -> bool {
+    DENYLIST.contains(&name) || name.ends_with(".egg-info")
+}
+
 pub struct ScanResult {
     pub files_scanned: usize,
     pub elapsed: Duration,
 }
 
-pub fn scan(root: &Path) -> ScanResult {
-    let start = Instant::now();
-
-    let paths: Vec<PathBuf> = WalkBuilder::new(root)
+/// Walks `root`, returning every `.py` file found, with the hard denylist
+/// (`.venv`, `site-packages`, etc.) pruned at the walk level so we never
+/// descend into a dependency's own installed copy of itself.
+pub fn walk(root: &Path) -> Vec<PathBuf> {
+    WalkBuilder::new(root)
         .filter_entry(|entry| {
             let name = entry.file_name().to_string_lossy();
-            !DENYLIST.contains(&name.as_ref()) && !name.ends_with(".egg-info")
+            !is_denied(&name)
         })
         .build()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_some_and(|ft| ft.is_file()))
         .map(|entry| entry.into_path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "py"))
-        .collect();
+        .collect()
+}
+
+/// Top-level directories directly under `root` that contain an `__init__.py`
+/// -- the project's own first-party packages. Non-recursive (a `src/`-layout
+/// project is a known, accepted gap: see plans/Phase1.md).
+///
+/// This runs before namemap resolution so a project's own top-level package
+/// name is never mistaken for a same-named installed dependency.
+pub fn first_party_packages(root: &Path) -> HashSet<String> {
+    let mut packages = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return packages;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_denied(&name) {
+            continue;
+        }
+        if entry.path().join("__init__.py").is_file() {
+            packages.insert(name);
+        }
+    }
+    packages
+}
+
+pub fn scan(root: &Path) -> ScanResult {
+    let start = Instant::now();
+
+    let paths = walk(root);
 
     let files_scanned = paths
         .par_iter()
@@ -103,5 +144,32 @@ mod tests {
 
         let result = scan(&dir);
         assert_eq!(result.files_scanned, 0);
+    }
+
+    #[test]
+    fn first_party_packages_finds_top_level_init_py_dirs_only() {
+        let dir = temp_dir("firstparty");
+        let pkg = dir.join("mypkg");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("__init__.py"), "").unwrap();
+
+        // Nested package -- must NOT be picked up (non-recursive).
+        let nested = pkg.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("__init__.py"), "").unwrap();
+
+        // Directory without __init__.py -- not a package.
+        let not_pkg = dir.join("scripts");
+        fs::create_dir_all(&not_pkg).unwrap();
+
+        // Denylisted dir even with __init__.py -- must be excluded.
+        let venv = dir.join(".venv");
+        fs::create_dir_all(&venv).unwrap();
+        fs::write(venv.join("__init__.py"), "").unwrap();
+
+        let packages = first_party_packages(&dir);
+        assert_eq!(packages, HashSet::from(["mypkg".to_string()]));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

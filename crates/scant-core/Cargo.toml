@@ -8,3 +8,12 @@ license.workspace = true
 ignore = { workspace = true }
 rayon = { workspace = true }
 ruff_python_parser = { workspace = true }
+ruff_python_ast = { workspace = true }
+ruff_text_size = { workspace = true }
+toml = { workspace = true }
+pep508_rs = { workspace = true }
+configparser = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
