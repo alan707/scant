@@ -4,6 +4,11 @@ All notable changes to `scant` are documented here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.0.1a1]
+
+### Fixed
+- The cold-start warning ("did you mean to install them first?") now excludes `pip`/`setuptools`/`wheel` from its resolved-overlap check. Found against a real Apache Superset clone: Superset declares `pip` as one of its 165 dependencies, and every venv bundles `pip` by default, so that single incidental match silently defeated the warning and produced a confidently-wrong "all 165 dependencies unused" report instead of flagging the empty environment.
+
 ## [0.0.1a0]
 
 First alpha. `scant` is a Rust CLI that scans a Python project and reports, per declared dependency, whether to **drop** it (never imported), **inline** it (used so little that carrying the dependency probably isn't worth it), or **keep** it.
