@@ -10,17 +10,17 @@ Guidance for Claude Code working in this repository.
 
 Signal 2 is the differentiator. Existing tools (deptry, fawltydeps, pip-check-reqs) do signal 1. **Protect the lightly-used feature** — it is why this project exists.
 
-**Read `PLAN.md` before doing anything.** It is the full specification: phases, acceptance criteria, output design, error catalog, test strategy. This file is the short version plus working rules.
+**Read `plans/PLAN.md` before doing anything.** It is the full specification: phases, acceptance criteria, output design, error catalog, test strategy. This file is the short version plus working rules.
 
 ## Current status
 
-Pre-alpha. No code yet. **We are on Phase 0** (scaffold). Do not skip ahead — each phase in `PLAN.md` has acceptance criteria that must pass before the next begins.
+Pre-alpha. No code yet. **We are on Phase 0** (scaffold). Do not skip ahead — each phase in `plans/PLAN.md` has acceptance criteria that must pass before the next begins.
 
 ## Working rules
 
 - **Work phase by phase.** Stop at the end of each phase and confirm acceptance criteria before continuing.
 - **Prefer the narrow correct version over the broad clever one.** Phase 1 supports exactly one manifest format and one repo. That is deliberate.
-- **Don't relitigate settled decisions.** The "Non-negotiables" below were decided with evidence (see PLAN.md §14). If you think one is wrong, say so explicitly and wait — don't silently do something else.
+- **Don't relitigate settled decisions.** The "Non-negotiables" below were decided with evidence (see `plans/PLAN.md` §14). If you think one is wrong, say so explicitly and wait — don't silently do something else.
 - **All logic goes in `scant-core`**, testable without a terminal. `scant-cli` only parses args, loads config, calls core, prints, sets exit codes.
 - **Never panic on user input.** Panics are for internal bugs only, and should tell the user to file an issue.
 
@@ -77,8 +77,8 @@ cargo run -- <path>             # run the CLI
 ## Testing
 
 - Unit-test every import form: `import a.b as c`, multiline `from x import (a,\n b)`, relative, `import *`, conditional in try/except, lazy imports inside functions.
-- Fixture projects in `tests/fixtures/`, one trait each — see PLAN.md §11b.
-- **The false-positive taxonomy in PLAN.md §11c is real, observed data.** Each row has a named specimen from a real repo. These are regression tests, not hypotheticals.
+- Fixture projects in `tests/fixtures/`, one trait each — see `plans/PLAN.md` §11b.
+- **The false-positive taxonomy in `plans/PLAN.md` §11c is real, observed data.** Each row has a named specimen from a real repo. These are regression tests, not hypotheticals.
 - `insta` snapshots lock the output formatting.
 
 ## Validation repos

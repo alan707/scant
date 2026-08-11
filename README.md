@@ -6,8 +6,6 @@ Most tools tell you what's unused. `scant` also tells you what's barely used. Th
 
 Built for plain English: flags are spelled out in full (`--threshold-lines`, not `-L`), and every result or error reads in words a non-developer can follow. The idea is to continue making the CLI very nice to look at. Like candy for your eyes.
 
-**Status:** early alpha (`0.0.1a1` on PyPI). See [PLAN.md](PLAN.md).
-
 Written in rust ⚡️
 
 ## Install
