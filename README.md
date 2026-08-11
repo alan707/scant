@@ -1,5 +1,9 @@
 ![scant](scant-logo.png)
 
+[![CI](https://github.com/alan707/scant/actions/workflows/ci.yml/badge.svg)](https://github.com/alan707/scant/actions/workflows/ci.yml)
+[![image](https://img.shields.io/pypi/v/scant.svg)](https://pypi.org/project/scant/)
+[![image](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Find the Python dependencies you barely use.
 
 Most tools tell you what's unused. `scant` also tells you what's barely used. Think of those dependencies pulled in for one function, called on a couple of lines, that might be stopping you from your next Python upgrade (true story).
