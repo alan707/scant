@@ -4,6 +4,12 @@ All notable changes to `scant` are documented here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.0.1a2]
+
+### Added
+- `--env` flag (replaces `--python`, kept as a backward-compatible alias): accepts a venv directory, a direct interpreter path, or a path found under `bin/`/`Scripts/`, resolved via a `sysconfig` subprocess call instead of guessing the `lib/pythonX.Y/site-packages` layout.
+- Auto-detection now finds any `pyvenv.cfg`-marked directory (not just `.venv`/`venv`), and reports an explicit "ambiguous" outcome with a friendly, ASCII-tree formatted message when multiple candidates are found.
+
 ## [0.0.1a1]
 
 ### Fixed
