@@ -2,7 +2,7 @@
 
 Find the Python dependencies you barely use.
 
-Most tools tell you what's unused. scant also tells you what's barely used. Think of those dependencies pulled in for one function, called on a couple of lines, that might be stopping you from your next Python upgrade (true story).
+Most tools tell you what's unused. `scant` also tells you what's barely used. Think of those dependencies pulled in for one function, called on a couple of lines, that might be stopping you from your next Python upgrade (true story).
 
 Built for plain English: flags are spelled out in full (`--threshold-lines`, not `-L`), and every result or error reads in words a non-developer can follow. The idea is to continue making the CLI very nice to look at. Like candy for your eyes.
 
