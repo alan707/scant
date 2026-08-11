@@ -11,3 +11,4 @@ path = "src/main.rs"
 [dependencies]
 scant-core = { path = "../scant-core" }
 clap = { workspace = true }
+anstream = { workspace = true }

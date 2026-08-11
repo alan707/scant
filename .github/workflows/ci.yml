@@ -29,9 +29,28 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v9.0.0
       - run: git clone --depth 1 https://github.com/mkdocs/mkdocs.git /tmp/mkdocs
+      - name: Install mkdocs into a venv
+        run: |
+          cd /tmp/mkdocs
+          uv venv
+          uv pip install -q -e .
       - name: Run scant against mkdocs
         run: |
-          output=$(cargo run --quiet -- /tmp/mkdocs)
+          set +e
+          output=$(cargo run --quiet -- /tmp/mkdocs --python /tmp/mkdocs/.venv)
+          exit_code=$?
           echo "$output"
-          echo "$output" | grep -qE "scanned [1-9][0-9]* files" || (echo "::error::scant reported zero files scanned against a real repo (mkdocs)" && exit 1)
+          set -e
+          # exit 2 is scant's operational-error code (bad manifest, no python env, etc.) --
+          # a real failure here, distinct from exit 0/1 which just mean "ran fine, found stuff or not"
+          if [ "$exit_code" -gt 1 ]; then
+            echo "::error::scant exited $exit_code (operational error) against a real repo (mkdocs)"
+            exit 1
+          fi
+          echo "$output" | grep -qE "15 packages declared" || (echo "::error::expected 15 declared dependencies for mkdocs, output didn't match" && exit 1)
+          # pyyaml_env_tag is the RECORD-resolution proof point (PLAN.md non-negotiable #3):
+          # it imports as yaml_env_tag, undiscoverable by name-guessing heuristics. It must
+          # show up as a real, resolved dependency here -- not silently missing/dropped.
+          echo "$output" | grep -qE "pyyaml_env_tag" || (echo "::error::pyyaml_env_tag should resolve via RECORD and appear in the report" && exit 1)

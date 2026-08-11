@@ -1,0 +1,14 @@
+---
+source: crates/scant-core/src/report.rs
+assertion_line: 382
+expression: rendered
+---
+mkdocs -- 3 packages declared, 39 files read, 0.0s
+Plan: drop 1, inline 1, keep 1.
+
+  ACTION  PACKAGE     USES  LINES  USE       WHERE
+  drop    bottleneck     1      1  none      --
+
+  inline  colorama       1      1  trivial   mkdocs/utils.py:7
+
+  keep    requests       1      1  heavy     mkdocs/api.py +1 file
