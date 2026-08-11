@@ -177,6 +177,27 @@ jobs:
             pyproject.toml
           retention-days: 1
 
+      - name: Extract this version's section from CHANGELOG.md
+        if: ${{ steps.inputs.outputs.dry_run != 'true' }}
+        id: notes
+        run: |
+          python3 - <<'PYEOF'
+          import os, re
+
+          version = "${{ steps.version.outputs.pep440_version }}"
+          with open("CHANGELOG.md") as f:
+              text = f.read()
+
+          # Matches this version's "## [X.Y.Z]" heading through the next "## [" heading (or EOF).
+          pattern = rf"^## \[{re.escape(version)}\]\s*\n(.*?)(?=^## \[|\Z)"
+          match = re.search(pattern, text, re.MULTILINE | re.DOTALL)
+          body = match.group(1).strip() if match else ""
+          notes = body if body else f"Release {version}. (No CHANGELOG.md entry found for this version.)"
+
+          with open("release_notes.md", "w") as f:
+              f.write(notes + "\n")
+          PYEOF
+
       - name: Create tag and GitHub Release
         if: ${{ steps.inputs.outputs.dry_run != 'true' }}
         env:
@@ -190,7 +211,7 @@ jobs:
           gh release create "$TAG" \
             --target main \
             --title "$TAG" \
-            --notes "Release ${{ steps.version.outputs.pep440_version }}." \
+            --notes-file release_notes.md \
             $PRERELEASE_FLAG
 
       - name: Dry run - report what would happen
