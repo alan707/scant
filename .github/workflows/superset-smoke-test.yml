@@ -1,0 +1,45 @@
+name: Superset smoke test
+
+# Nightly-only, not per-PR: unlike the mkdocs smoke test in ci.yml, this installs Superset's real dependencies (not an empty venv) so scant's verdicts are checked against genuinely-resolvable imports -- the false-positive/false-negative bugs this tool exists to catch only show up against a real install.
+on:
+  workflow_dispatch:
+  schedule:
+    # 05:43 UTC -- off-the-hour, distinct from release.yml's nightly canary at 06:11 UTC.
+    - cron: "43 5 * * *"
+
+jobs:
+  smoke-test:
+    name: Smoke test (Superset, real install)
+    runs-on: ubuntu-latest
+    container: rust:latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: git clone --depth 1 https://github.com/apache/superset.git /tmp/superset
+      - name: Install Superset's real dependencies into a Python 3.11 venv
+        run: |
+          cd /tmp/superset
+          uv venv .venv --python 3.11
+          uv pip install -r requirements/base.txt --python .venv/bin/python3
+          # prophet is an optional extra, not in base.txt -- it's the flagship "huge dep used on one line" specimen this smoke test exists to catch, so install it too
+          uv pip install "prophet>=1.3.0,<2" --python .venv/bin/python3
+      - run: cargo build --release --quiet
+      - name: Run scant against a real Superset install
+        run: |
+          set +e
+          output=$(./target/release/scant /tmp/superset --env /tmp/superset/.venv)
+          exit_code=$?
+          echo "$output"
+          set -e
+          # exit 2 is scant's operational-error code -- a real failure here, distinct from exit 0/1 which just mean "ran fine, found stuff or not"
+          if [ "$exit_code" -gt 1 ]; then
+            echo "::error::scant exited $exit_code (operational error) against a real install (Superset)"
+            exit 1
+          fi
+          echo "$output" | grep -qE "[1-9][0-9]* files read" || (echo "::error::scant reported zero files scanned against a real repo (Superset)" && exit 1)
+          # prophet must resolve as a real, verified "inline" verdict here -- if it silently drops to "0 uses" it means name resolution against the real venv broke
+          echo "$output" | grep -qE "inline\s+prophet\s" || (echo "::error::expected prophet to resolve as a real 'inline' verdict against a genuinely-installed Superset" && exit 1)
