@@ -1,6 +1,7 @@
 ![scant](scant-logo.png)
 
 [![CI](https://github.com/alan707/scant/actions/workflows/ci.yml/badge.svg)](https://github.com/alan707/scant/actions/workflows/ci.yml)
+[![image](https://img.shields.io/github/v/release/alan707/scant?include_prereleases&label=release)](https://github.com/alan707/scant/releases)
 [![image](https://img.shields.io/pypi/v/scant.svg)](https://pypi.org/project/scant/)
 [![image](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
