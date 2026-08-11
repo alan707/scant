@@ -118,13 +118,15 @@ pub fn analyze(
 
     let mut warnings = manifest.warnings.clone();
 
-    // Cold-start trap: a fresh clone before `pip install -r requirements.txt`
-    // would otherwise report every dependency as "unused" on first run. Fire
-    // only on an exact zero-overlap check, not a fuzzy threshold.
+    // Cold-start trap: warns when zero declared deps resolve, excluding pip/setuptools/wheel since every venv bundles them and a project declaring one (Superset pins `pip`) would otherwise mask a totally empty environment.
+    let bootstrap_tooling: HashSet<PackageName> = ["pip", "setuptools", "wheel"]
+        .into_iter()
+        .map(|s| PackageName::new(s.to_string()).unwrap())
+        .collect();
     let resolved_overlap = manifest
         .dependencies
         .iter()
-        .filter(|d| name_map.contains(&d.name))
+        .filter(|d| !bootstrap_tooling.contains(&d.name) && name_map.contains(&d.name))
         .count();
     if !manifest.dependencies.is_empty() && resolved_overlap == 0 {
         warnings.push(format!(
@@ -419,6 +421,35 @@ mod tests {
             .join("python3.11")
             .join("site-packages");
         fs::create_dir_all(&site_packages).unwrap();
+
+        let report = analyze(&root, &python_env, Thresholds::default()).unwrap();
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("did you mean to install them first"))
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cold_start_warns_even_when_only_bootstrap_tooling_resolves() {
+        let root = temp_dir("cold-start-pip-only");
+        fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"proj\"\ndependencies = [\"requests\", \"pip\"]\n",
+        )
+        .unwrap();
+        // pip is bundled in every venv by default, but nothing else was ever installed -- the warning must still fire.
+        let python_env = root.join(".venv-pip-only");
+        let site_packages = python_env
+            .join("lib")
+            .join("python3.11")
+            .join("site-packages");
+        let pip_dist_info = site_packages.join("pip-26.2.1.dist-info");
+        fs::create_dir_all(&pip_dist_info).unwrap();
+        fs::write(pip_dist_info.join("top_level.txt"), "pip").unwrap();
 
         let report = analyze(&root, &python_env, Thresholds::default()).unwrap();
         assert!(
