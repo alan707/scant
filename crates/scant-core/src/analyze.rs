@@ -59,6 +59,12 @@ pub struct DepReport {
     pub symbols: u32,
     pub verdict: Verdict,
     pub usage: UsageBand,
+    /// Files with real usage, as paths relative to the scanned root, each
+    /// paired with the lowest line number touched in that file -- sorted by
+    /// path for determinism. Empty for `drop`. `report.rs` renders this as
+    /// a single `path:line` for a one-file dependency, or `path +N files`
+    /// when usage is spread across more than one.
+    pub locations: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +151,16 @@ pub fn analyze(
     let mut deps: Vec<DepReport> = manifest
         .dependencies
         .iter()
-        .map(|dep| build_dep_report(dep, &name_map, &file_usages, &wildcard_roots, &thresholds))
+        .map(|dep| {
+            build_dep_report(
+                dep,
+                &name_map,
+                &file_usages,
+                &wildcard_roots,
+                &thresholds,
+                root,
+            )
+        })
         .collect();
     deps.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -164,6 +179,7 @@ fn build_dep_report(
     file_usages: &[FileUsage],
     wildcard_roots: &HashSet<String>,
     thresholds: &Thresholds,
+    scan_root: &Path,
 ) -> DepReport {
     let import_roots = name_map.imports_for(&dep.name).cloned().unwrap_or_default();
 
@@ -171,24 +187,33 @@ fn build_dep_report(
     let mut lines_total = 0u32;
     let mut symbols: HashSet<&str> = HashSet::new();
     let mut files_with_usage: HashSet<&PathBuf> = HashSet::new();
+    let mut locations: Vec<(String, u32)> = Vec::new();
 
     for usage in file_usages {
-        let mut file_has_usage = false;
-        for root in &import_roots {
-            let Some(record) = usage.records.get(root) else {
+        let mut min_line: Option<u32> = None;
+        for import_root in &import_roots {
+            let Some(record) = usage.records.get(import_root) else {
                 continue;
             };
             imports += record.import_statements;
             lines_total += record.lines.len() as u32;
             symbols.extend(record.symbols.iter().map(String::as_str));
-            if !record.lines.is_empty() {
-                file_has_usage = true;
+            if let Some(&first) = record.lines.iter().next() {
+                min_line = Some(min_line.map_or(first, |m: u32| m.min(first)));
             }
         }
-        if file_has_usage {
+        if let Some(line) = min_line {
             files_with_usage.insert(&usage.path);
+            let display_path = usage
+                .path
+                .strip_prefix(scan_root)
+                .unwrap_or(&usage.path)
+                .display()
+                .to_string();
+            locations.push((display_path, line));
         }
     }
+    locations.sort();
 
     let is_wildcard = import_roots
         .iter()
@@ -214,6 +239,7 @@ fn build_dep_report(
         symbols: symbol_count,
         verdict,
         usage,
+        locations,
     }
 }
 

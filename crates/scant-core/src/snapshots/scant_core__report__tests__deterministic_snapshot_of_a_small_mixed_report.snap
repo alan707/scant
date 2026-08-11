@@ -1,33 +1,14 @@
 ---
 source: crates/scant-core/src/report.rs
+assertion_line: 382
 expression: rendered
 ---
-  scant · mkdocs          3 deps · 39 files · 0.01s
-  ──────────────────────────────────────────────────────────────────
+mkdocs -- 3 packages declared, 39 files read, 0.0s
+Plan: drop 1, inline 1, keep 1.
 
-  DROP?          never imported                             1
+  ACTION  PACKAGE     USES  LINES  USE       WHERE
+  drop    bottleneck     1      1  none      --
 
-    bottleneck
-      imports:    1
-      files:      1
-      lines:      1
-      usage:      none
-      verdict:    drop
+  inline  colorama       1      1  trivial   mkdocs/utils.py:7
 
-  INLINE?        one symbol, a few lines                    1
-
-    colorama
-      imports:    1
-      files:      1
-      lines:      1
-      usage:      trivial
-      verdict:    inline
-
-  KEEP           earning their place                        1
-
-    requests
-      imports:    1
-      files:      1
-      lines:      1
-      usage:      heavy
-      verdict:    keep
+  keep    requests       1      1  heavy     mkdocs/api.py +1 file

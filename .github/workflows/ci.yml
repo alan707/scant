@@ -49,7 +49,7 @@ jobs:
             echo "::error::scant exited $exit_code (operational error) against a real repo (mkdocs)"
             exit 1
           fi
-          echo "$output" | grep -qE "15 deps" || (echo "::error::expected 15 declared dependencies for mkdocs, output didn't match" && exit 1)
+          echo "$output" | grep -qE "15 packages declared" || (echo "::error::expected 15 declared dependencies for mkdocs, output didn't match" && exit 1)
           # pyyaml_env_tag is the RECORD-resolution proof point (PLAN.md non-negotiable #3):
           # it imports as yaml_env_tag, undiscoverable by name-guessing heuristics. It must
           # show up as a real, resolved dependency here -- not silently missing/dropped.

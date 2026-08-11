@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -69,7 +70,8 @@ fn main() -> ExitCode {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| cli.path.display().to_string());
 
-    print!("{}", report::render(&analysis, &project_name));
+    let rendered = report::render(&analysis, &project_name, true);
+    let _ = write!(anstream::stdout(), "{rendered}");
 
     if analysis.has_findings() {
         ExitCode::from(1)

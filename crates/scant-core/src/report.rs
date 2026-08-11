@@ -1,31 +1,29 @@
-//! Renders the flat per-dependency report format locked into README.md:
-//! `imports:`/`files:`/`lines:`/`usage:`/`verdict:`, 2-space indent, values
-//! column-aligned. Dependencies are grouped by what to do (DROP? / INLINE? /
-//! KEEP), not alphabetically, per CLAUDE.md's output rule -- sorted
-//! alphabetically only within each group (already the case coming out of
-//! `analyze::analyze`, which sorts by normalized name).
+//! Renders the dependency report as a single flat table, one row per
+//! dependency, grouped by action (drop / inline / keep) with a blank line
+//! between groups -- not a bold section header per group, the `ACTION`
+//! column already says it, and a single global column header keeps every
+//! row on the same grid (which is also what makes a `WHERE` column
+//! workable: it wouldn't be if each group had its own differently-shaped
+//! header).
 
 use std::fmt::Write as _;
 
+use owo_colors::OwoColorize;
+
 use crate::analyze::{DepReport, Report, UsageBand, Verdict};
 
-const RULE_WIDTH: usize = 66;
+const MIN_NAME_WIDTH: usize = 7; // fits the "PACKAGE" column header itself
+const ACTION_WIDTH: usize = 8; // fits "inline" plus a 2-space gutter
+const WHERE_MAX_WIDTH: usize = 80;
 
-pub fn render(report: &Report, project_name: &str) -> String {
+/// `use_color` embeds real ANSI codes when true -- it does not itself
+/// decide whether that's appropriate for the current output destination.
+/// That policy call (TTY? `NO_COLOR`? piped to a file?) belongs to
+/// `scant-cli`, which writes the result through `anstream`'s auto-detecting
+/// stream (strips/translates as needed). Tests always pass `false` so
+/// snapshots stay plain, readable text.
+pub fn render(report: &Report, project_name: &str, use_color: bool) -> String {
     let mut out = String::new();
-
-    let _ = writeln!(
-        out,
-        "  scant · {project_name}          {deps} deps · {files} files · {elapsed:.2}s",
-        deps = report.deps.len(),
-        files = report.files_scanned,
-        elapsed = report.elapsed.as_secs_f64(),
-    );
-    let _ = writeln!(out, "  {}", "─".repeat(RULE_WIDTH));
-
-    for warning in &report.warnings {
-        let _ = writeln!(out, "\n  NOTE -- {warning}");
-    }
 
     let drop: Vec<&DepReport> = report
         .deps
@@ -43,39 +41,150 @@ pub fn render(report: &Report, project_name: &str) -> String {
         .filter(|d| d.verdict == Verdict::Keep)
         .collect();
 
-    render_section(&mut out, "DROP?", "never imported", &drop);
-    render_section(&mut out, "INLINE?", "one symbol, a few lines", &inline);
-    render_section(&mut out, "KEEP", "earning their place", &keep);
+    let _ = writeln!(
+        out,
+        "{project_name} -- {deps} packages declared, {files} files read, {elapsed:.1}s",
+        deps = report.deps.len(),
+        files = report.files_scanned,
+        elapsed = report.elapsed.as_secs_f64(),
+    );
+    let _ = writeln!(
+        out,
+        "Plan: drop {drop}, inline {inline}, keep {keep}.",
+        drop = drop.len(),
+        inline = inline.len(),
+        keep = keep.len(),
+    );
+
+    for warning in &report.warnings {
+        let _ = writeln!(out, "\nNOTE -- {warning}");
+    }
+
+    if report.deps.is_empty() {
+        return out;
+    }
+    out.push('\n');
+
+    let name_width = report
+        .deps
+        .iter()
+        .map(|d| d.display_name.len())
+        .max()
+        .unwrap_or(MIN_NAME_WIDTH)
+        .max(MIN_NAME_WIDTH);
+
+    let _ = writeln!(
+        out,
+        "  {:<ACTION_WIDTH$}{:<name_width$}  {:>4}  {:>5}  {:<8}  WHERE",
+        "ACTION",
+        "PACKAGE",
+        "USES",
+        "LINES",
+        "USE",
+        name_width = name_width
+    );
+
+    let mut first_group = true;
+    for group in [&drop, &inline, &keep] {
+        if group.is_empty() {
+            continue;
+        }
+        if !first_group {
+            out.push('\n');
+        }
+        first_group = false;
+        for dep in group {
+            render_row(&mut out, dep, name_width, use_color);
+        }
+    }
 
     out
 }
 
-fn render_section(out: &mut String, header: &str, subtitle: &str, deps: &[&DepReport]) {
-    if deps.is_empty() {
-        return;
-    }
+fn render_row(out: &mut String, dep: &DepReport, name_width: usize, use_color: bool) {
+    let label = verdict_label(dep.verdict);
+    // Pad on the *plain* word first, then color it -- ANSI escape bytes
+    // count toward a string's length, so `{:<N}` on an already-colored
+    // string would under-pad. Padding as a separate literal sidesteps that.
+    let padding = " ".repeat(ACTION_WIDTH.saturating_sub(label.len()));
+    let action_cell = if use_color {
+        match dep.verdict {
+            Verdict::Drop => format!("{}{padding}", label.red()),
+            Verdict::Inline => format!("{}{padding}", label.yellow()),
+            Verdict::Keep => format!("{}{padding}", label.green()),
+        }
+    } else {
+        format!("{label}{padding}")
+    };
+
+    let where_text = where_column(dep);
+    let where_cell = if use_color {
+        // Both real paths and the "--" elision marker get the same plain
+        // "dim" attribute (ANSI 2) -- no separate hue needed for either;
+        // dim is the one style attribute that reliably reads correctly
+        // across light/dark/Solarized-style terminal themes.
+        where_text.dimmed().to_string()
+    } else {
+        where_text
+    };
+
     let _ = writeln!(
         out,
-        "\n  {header:<15}{subtitle:<40}{count:>4}",
-        count = deps.len()
+        "  {action_cell}{:<name_width$}  {:>4}  {:>5}  {:<8}  {where_cell}",
+        dep.display_name,
+        dep.imports,
+        dep.lines,
+        usage_label(dep.usage),
+        name_width = name_width
     );
-    for dep in deps {
-        render_dep(out, dep);
-    }
 }
 
-fn render_dep(out: &mut String, dep: &DepReport) {
-    let _ = writeln!(out, "\n    {}", dep.display_name);
-    let _ = writeln!(out, "      {:<12}{}", "imports:", dep.imports);
-    let _ = writeln!(out, "      {:<12}{}", "files:", dep.files);
-    let _ = writeln!(out, "      {:<12}{}", "lines:", dep.lines);
-    let _ = writeln!(out, "      {:<12}{}", "usage:", usage_label(dep.usage));
-    let _ = writeln!(
-        out,
-        "      {:<12}{}",
-        "verdict:",
-        verdict_label(dep.verdict)
-    );
+/// `drop` never has a location (nothing to point at). `inline` shows an
+/// exact `path:line` -- usage is small enough that "here's the line" is
+/// genuinely actionable. `keep` shows just the first file, folding any
+/// additional files into a `+N files` suffix -- usage is spread widely
+/// enough that one exact line wouldn't tell the whole story anyway.
+fn where_column(dep: &DepReport) -> String {
+    if dep.locations.is_empty() {
+        return "--".to_string();
+    }
+    let (first_path, first_line) = &dep.locations[0];
+    let raw = match dep.verdict {
+        Verdict::Drop => return "--".to_string(),
+        Verdict::Inline => format!("{first_path}:{first_line}"),
+        Verdict::Keep => {
+            if dep.locations.len() == 1 {
+                first_path.clone()
+            } else {
+                let extra = dep.locations.len() - 1;
+                let unit = if extra == 1 { "file" } else { "files" };
+                format!("{first_path} +{extra} {unit}")
+            }
+        }
+    };
+    truncate_front(&raw, WHERE_MAX_WIDTH)
+}
+
+/// Truncates from the front, keeping the tail (filename and immediate
+/// parent) intact -- that's the most useful part of a path, and a fixed
+/// character budget keeps output deterministic (no terminal-width sensing,
+/// which would make `insta` snapshots environment-dependent).
+fn truncate_front(s: &str, max: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max {
+        return s.to_string();
+    }
+    const ELLIPSIS: &str = "...";
+    let keep = max.saturating_sub(ELLIPSIS.chars().count());
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(keep)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{ELLIPSIS}{tail}")
 }
 
 fn usage_label(band: UsageBand) -> &'static str {
@@ -112,11 +221,12 @@ mod tests {
             symbols: 1,
             verdict,
             usage,
+            locations: vec![],
         }
     }
 
     #[test]
-    fn numpy_example_matches_readme_field_alignment() {
+    fn numpy_example_renders_as_a_table_row() {
         let report = Report {
             manifest_source_label: "pyproject.toml",
             files_scanned: 1,
@@ -125,29 +235,32 @@ mod tests {
             warnings: vec![],
         };
 
-        let rendered = render(&report, "proj");
-        assert!(rendered.contains("    numpy\n"));
-        assert!(rendered.contains("      imports:    1\n"));
-        assert!(rendered.contains("      files:      1\n"));
-        assert!(rendered.contains("      lines:      1\n"));
-        assert!(rendered.contains("      usage:      trivial\n"));
-        assert!(rendered.contains("      verdict:    inline\n"));
+        let rendered = render(&report, "proj", false);
+        assert!(rendered.contains("Plan: drop 0, inline 1, keep 0."));
+        assert!(rendered.contains("ACTION"));
+        assert!(rendered.contains("PACKAGE"));
+        assert!(rendered.contains("USES"));
+        assert!(rendered.contains("LINES"));
+        assert!(rendered.contains("USE"));
+        assert!(rendered.contains("WHERE"));
+        assert!(rendered.contains("inline"));
+        assert!(rendered.contains("numpy"));
+        assert!(rendered.contains("trivial"));
+        assert!(!rendered.contains('?'));
     }
 
     #[test]
-    fn empty_sections_are_omitted() {
+    fn empty_report_still_shows_plan_line() {
         let report = Report {
             manifest_source_label: "pyproject.toml",
             files_scanned: 1,
             elapsed: Duration::from_secs_f64(0.0),
-            deps: vec![dep("kept_dep", Verdict::Keep, UsageBand::Heavy)],
+            deps: vec![],
             warnings: vec![],
         };
 
-        let rendered = render(&report, "proj");
-        assert!(!rendered.contains("DROP?"));
-        assert!(!rendered.contains("INLINE?"));
-        assert!(rendered.contains("KEEP"));
+        let rendered = render(&report, "proj", false);
+        assert!(rendered.contains("Plan: drop 0, inline 0, keep 0."));
     }
 
     #[test]
@@ -160,49 +273,111 @@ mod tests {
             warnings: vec!["something worth knowing".to_string()],
         };
 
-        let rendered = render(&report, "proj");
+        let rendered = render(&report, "proj", false);
         assert!(rendered.contains("NOTE -- something worth knowing"));
     }
 
     #[test]
-    fn drop_verdict_shows_usage_none() {
+    fn drop_has_no_location() {
         let report = Report {
             manifest_source_label: "pyproject.toml",
             files_scanned: 1,
             elapsed: Duration::from_secs_f64(0.0),
-            deps: vec![DepReport {
-                display_name: "bottleneck".to_string(),
-                name: PackageName::new("bottleneck".to_string()).unwrap(),
-                imports: 0,
-                files: 0,
-                lines: 0,
-                symbols: 0,
-                verdict: Verdict::Drop,
-                usage: UsageBand::None,
-            }],
+            deps: vec![dep("bottleneck", Verdict::Drop, UsageBand::None)],
             warnings: vec![],
         };
 
-        let rendered = render(&report, "proj");
-        assert!(rendered.contains("      usage:      none\n"));
-        assert!(rendered.contains("      verdict:    drop\n"));
+        let rendered = render(&report, "proj", false);
+        assert!(rendered.contains("bottleneck"));
+        assert!(rendered.contains("--"));
+    }
+
+    #[test]
+    fn inline_location_shows_exact_line() {
+        let mut d = dep("markupsafe", Verdict::Inline, UsageBand::Trivial);
+        d.locations = vec![("mkdocs/utils.py".to_string(), 41)];
+        let report = Report {
+            manifest_source_label: "pyproject.toml",
+            files_scanned: 1,
+            elapsed: Duration::from_secs_f64(0.0),
+            deps: vec![d],
+            warnings: vec![],
+        };
+
+        let rendered = render(&report, "proj", false);
+        assert!(rendered.contains("mkdocs/utils.py:41"));
+    }
+
+    #[test]
+    fn keep_with_one_file_shows_bare_path_no_line() {
+        let mut d = dep("watchdog", Verdict::Keep, UsageBand::Light);
+        d.locations = vec![("mkdocs/livereload/__init__.py".to_string(), 12)];
+        let report = Report {
+            manifest_source_label: "pyproject.toml",
+            files_scanned: 1,
+            elapsed: Duration::from_secs_f64(0.0),
+            deps: vec![d],
+            warnings: vec![],
+        };
+
+        let rendered = render(&report, "proj", false);
+        assert!(rendered.contains("mkdocs/livereload/__init__.py"));
+        assert!(!rendered.contains("__init__.py:12"));
+    }
+
+    #[test]
+    fn keep_with_multiple_files_folds_the_rest_into_a_count() {
+        let mut d = dep("click", Verdict::Keep, UsageBand::Heavy);
+        d.locations = vec![
+            ("mkdocs/__main__.py".to_string(), 5),
+            ("mkdocs/commands/build.py".to_string(), 10),
+            ("mkdocs/commands/serve.py".to_string(), 3),
+            ("mkdocs/plugins.py".to_string(), 88),
+        ];
+        let report = Report {
+            manifest_source_label: "pyproject.toml",
+            files_scanned: 1,
+            elapsed: Duration::from_secs_f64(0.0),
+            deps: vec![d],
+            warnings: vec![],
+        };
+
+        let rendered = render(&report, "proj", false);
+        assert!(rendered.contains("mkdocs/__main__.py +3 files"));
+    }
+
+    #[test]
+    fn long_path_is_truncated_from_the_front_deterministically() {
+        assert_eq!(
+            truncate_front("a/very/deeply/nested/package/subdir/module/file.py:123", 20),
+            "...odule/file.py:123"
+        );
+        assert_eq!(truncate_front("short.py:1", 20), "short.py:1");
     }
 
     #[test]
     fn deterministic_snapshot_of_a_small_mixed_report() {
+        let mut inline_dep = dep("colorama", Verdict::Inline, UsageBand::Trivial);
+        inline_dep.locations = vec![("mkdocs/utils.py".to_string(), 7)];
+        let mut keep_dep = dep("requests", Verdict::Keep, UsageBand::Heavy);
+        keep_dep.locations = vec![
+            ("mkdocs/api.py".to_string(), 3),
+            ("mkdocs/client.py".to_string(), 40),
+        ];
+
         let report = Report {
             manifest_source_label: "pyproject.toml",
             files_scanned: 39,
             elapsed: Duration::from_secs_f64(0.012),
             deps: vec![
                 dep("bottleneck", Verdict::Drop, UsageBand::None),
-                dep("colorama", Verdict::Inline, UsageBand::Trivial),
-                dep("requests", Verdict::Keep, UsageBand::Heavy),
+                inline_dep,
+                keep_dep,
             ],
             warnings: vec![],
         };
 
-        let rendered = render(&report, "mkdocs");
+        let rendered = render(&report, "mkdocs", false);
         insta::assert_snapshot!(rendered);
     }
 }

@@ -14,6 +14,7 @@ toml = { workspace = true }
 pep508_rs = { workspace = true }
 configparser = { workspace = true }
 serde = { workspace = true }
+owo-colors = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

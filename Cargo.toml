@@ -21,3 +21,5 @@ pep508_rs = "0.9.2"
 configparser = "3.2.0"
 serde = { version = "1", features = ["derive"] }
 insta = "1"
+owo-colors = "4.3.0"
+anstream = "1.0.0"
