@@ -1,4 +1,4 @@
-# scant
+![scant](scant-logo.png)
 
 Find the Python dependencies you barely use.
 
