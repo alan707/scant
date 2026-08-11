@@ -8,6 +8,8 @@ Built for plain English: flags are spelled out in full (`--threshold-lines`, not
 
 **Status:** pre-alpha, targeting v0.0.1. See [PLAN.md](PLAN.md).
 
+Written in rust ⚡️
+
 ## Install
 
 Not yet published.
