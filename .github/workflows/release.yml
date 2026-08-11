@@ -1,8 +1,8 @@
 name: Release
 
-# Manual-only: the PyPI trusted publisher's environment (`publish`) is branch-restricted to
-# `main`, and a tag-push ref is not `refs/heads/main` -- so this can never be `on: push: tags:`.
-# A human explicitly runs this from the Actions tab against `main`.
+# Manual-only for a real release: the PyPI trusted publisher's environment (`publish`) is
+# branch-restricted to `main`, and a tag-push ref is not `refs/heads/main` -- so this can never be
+# `on: push: tags:`. A human explicitly runs this from the Actions tab against `main`.
 #
 # This workflow never commits a version-bump to `main`. The repo's branch ruleset requires every
 # change to `main` -- including one from a workflow's GITHUB_TOKEN -- to go through a PR that
@@ -13,6 +13,8 @@ name: Release
 # covered by the branch-only ruleset, so this needs no bypass). The committed version fields in
 # Cargo.toml/pyproject.toml are not auto-advanced by this workflow -- bump them in a normal PR
 # whenever you like, independent of releasing.
+#
+# The nightly `schedule` trigger canary-runs the same pipeline with a fixed version (0.0.0a0) and dry_run forced true, since scheduled events carry no workflow_dispatch inputs -- catches pipeline breakage before a real release, never tags/releases/publishes.
 on:
   workflow_dispatch:
     inputs:
@@ -31,6 +33,9 @@ on:
         required: false
         type: boolean
         default: true
+  schedule:
+    # 06:11 UTC -- off-the-hour, lands overnight US / late-morning Europe.
+    - cron: "11 6 * * *"
 
 permissions:
   contents: read
@@ -46,10 +51,22 @@ jobs:
       cargo_version: ${{ steps.version.outputs.cargo_version }}
       git_tag: ${{ steps.version.outputs.git_tag }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      dry_run: ${{ steps.inputs.outputs.dry_run }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: main
+
+      - name: Resolve effective inputs
+        id: inputs
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "version=0.0.0a0" >> "$GITHUB_OUTPUT"
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Validate PEP 440 version and derive Cargo semver
         id: version
@@ -59,7 +76,7 @@ jobs:
           import os, sys
           from packaging.version import Version, InvalidVersion
 
-          raw = "${{ inputs.version }}"
+          raw = "${{ steps.inputs.outputs.version }}"
           try:
               v = Version(raw)
           except InvalidVersion as e:
@@ -161,7 +178,7 @@ jobs:
           retention-days: 1
 
       - name: Create tag and GitHub Release
-        if: ${{ !inputs.dry_run }}
+        if: ${{ steps.inputs.outputs.dry_run != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -177,7 +194,7 @@ jobs:
             $PRERELEASE_FLAG
 
       - name: Dry run - report what would happen
-        if: ${{ inputs.dry_run }}
+        if: ${{ steps.inputs.outputs.dry_run == 'true' }}
         run: |
           echo "DRY RUN: would create tag ${{ steps.version.outputs.git_tag }} and a GitHub Release targeting main."
           echo "DRY RUN: no tag or release was created. The build matrix still runs against the patched manifests to validate the pipeline end to end."
@@ -243,8 +260,8 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: build
-    if: ${{ !inputs.dry_run }}
+    needs: [tag, build]
+    if: ${{ needs.tag.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     environment: publish
     permissions:
