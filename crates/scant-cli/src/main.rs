@@ -15,11 +15,12 @@ struct Cli {
     #[arg(default_value = ".")]
     path: PathBuf,
 
-    /// Venv or interpreter directory used to map package names to import
-    /// names. Auto-detected from $VIRTUAL_ENV, $CONDA_PREFIX, or a
-    /// .venv/venv folder under PATH when not given.
-    #[arg(long)]
-    python: Option<PathBuf>,
+    /// Python environment used to map package names to import names: a venv
+    /// directory, a conda prefix, a bare site-packages dir, or a direct
+    /// path to a Python interpreter. Auto-detected from $VIRTUAL_ENV,
+    /// $CONDA_PREFIX, or a pyvenv.cfg-marked folder under PATH when not given.
+    #[arg(long, alias = "python")]
+    env: Option<PathBuf>,
 
     /// Flag dependencies used on N or fewer lines
     #[arg(long, default_value_t = 3)]
@@ -37,16 +38,19 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let Some((python_env, _source)) = namemap::detect_python_env(cli.python.as_deref(), &cli.path)
-    else {
-        eprintln!(
-            "Couldn't find a Python environment to read installed package names from. \
-             scant checked $VIRTUAL_ENV, $CONDA_PREFIX, and a .venv or venv folder under \
-             '{path}', but found none. Activate a virtualenv first, or point at one \
-             directly: scant {path} --python .venv",
-            path = cli.path.display(),
-        );
-        return ExitCode::from(2);
+    let python_env = match namemap::detect_python_env(cli.env.as_deref(), &cli.path) {
+        namemap::PythonEnvDetection::Found { path, .. } => path,
+        namemap::PythonEnvDetection::Ambiguous(candidates) => {
+            eprintln!(
+                "{}",
+                namemap::format_ambiguous_error(&cli.path, &candidates)
+            );
+            return ExitCode::from(2);
+        }
+        namemap::PythonEnvDetection::NotFound => {
+            eprintln!("{}", namemap::format_not_found_error(&cli.path));
+            return ExitCode::from(2);
+        }
     };
 
     let thresholds = Thresholds {

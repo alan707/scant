@@ -40,7 +40,13 @@ impl NameMap {
 
 #[derive(Debug)]
 pub enum NameMapError {
-    NoSitePackages { python_path: PathBuf },
+    NoSitePackages {
+        python_path: PathBuf,
+    },
+    InterpreterFailed {
+        interpreter: PathBuf,
+        message: String,
+    },
 }
 
 impl fmt::Display for NameMapError {
@@ -49,11 +55,23 @@ impl fmt::Display for NameMapError {
             NameMapError::NoSitePackages { python_path } => write!(
                 f,
                 "Couldn't find installed packages under '{}'. scant looks for a \
-                 site-packages directory there (either directly, or under \
-                 lib/python3.*/site-packages or Lib/site-packages). Check that \
-                 --python points at a virtualenv or Python install with packages \
-                 already installed.",
+                 site-packages directory there (either directly, under \
+                 lib/python3.*/site-packages or Lib/site-packages, or via a \
+                 bin/python interpreter it can ask directly). Check that --env \
+                 points at a virtualenv, interpreter, or Python install with \
+                 packages already installed.",
                 python_path.display()
+            ),
+            NameMapError::InterpreterFailed {
+                interpreter,
+                message,
+            } => write!(
+                f,
+                "Tried to ask the Python interpreter at '{}' where its packages are \
+                 installed, but that failed: {message}. Make sure the path points at \
+                 a real Python interpreter, or point --env at the environment \
+                 directory instead.",
+                interpreter.display()
             ),
         }
     }
@@ -71,11 +89,89 @@ fn has_dist_info(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolves a `--python` path (a venv root, conda prefix, or bare
-/// site-packages dir) to an actual site-packages directory.
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+}
+
+/// Looks for a venv-shaped interpreter under a directory, so a directory
+/// path can be resolved via the same `sysconfig` ask as a direct interpreter
+/// path -- avoids hand-guessing the `lib/pythonX.Y` layout when we don't
+/// have to.
+fn find_interpreter_in(dir: &Path) -> Option<PathBuf> {
+    for candidate in [
+        "bin/python3",
+        "bin/python",
+        "Scripts/python.exe",
+        "Scripts/python3.exe",
+    ] {
+        let path = dir.join(candidate);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Asks a Python interpreter directly where it installs packages, rather
+/// than guessing a `lib/pythonX.Y/site-packages`-shaped path -- works for
+/// any Python version or layout without pattern-matching on directory names.
+fn site_packages_via_sysconfig(interpreter: &Path) -> Result<PathBuf, NameMapError> {
+    let fail = |message: String| NameMapError::InterpreterFailed {
+        interpreter: interpreter.to_path_buf(),
+        message,
+    };
+
+    let output = std::process::Command::new(interpreter)
+        .args([
+            "-c",
+            "import sysconfig; print(sysconfig.get_path('purelib'))",
+        ])
+        .output()
+        .map_err(|e| fail(e.to_string()))?;
+
+    if !output.status.success() {
+        return Err(fail(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+
+    let reported = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if reported.is_dir() {
+        Ok(reported)
+    } else {
+        Err(fail(format!(
+            "reported a site-packages directory that doesn't exist: '{}'",
+            reported.display()
+        )))
+    }
+}
+
+/// Resolves a `--env` path (a venv root, conda prefix, bare site-packages
+/// dir, or a direct interpreter path) to an actual site-packages directory.
 pub fn resolve_site_packages(python_path: &Path) -> Result<PathBuf, NameMapError> {
     if has_dist_info(python_path) {
         return Ok(python_path.to_path_buf());
+    }
+
+    if is_executable_file(python_path) {
+        return site_packages_via_sysconfig(python_path);
+    }
+
+    if let Some(interpreter) = find_interpreter_in(python_path) {
+        return site_packages_via_sysconfig(&interpreter);
     }
 
     let posix_lib = python_path.join("lib");
@@ -209,36 +305,150 @@ pub enum PythonEnvSource {
     LocalVenv,
 }
 
+/// Outcome of looking for a Python environment when `--env` wasn't given:
+/// exactly one candidate is used automatically; more than one is a genuine
+/// "which one did you mean" that scant refuses to guess at; zero is the
+/// friendly "here's what to do" case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PythonEnvDetection {
+    Found {
+        path: PathBuf,
+        source: PythonEnvSource,
+    },
+    Ambiguous(Vec<PathBuf>),
+    NotFound,
+}
+
 /// Resolves the Python environment to read installed metadata from:
-/// `--python` if given, else `$VIRTUAL_ENV`, else `$CONDA_PREFIX`, else a
-/// `.venv`/`venv` directory under the scanned root. Returns `None` if none
-/// of these resolve -- the caller turns that into a friendly, exit-2 error.
-/// Bare interpreter-binary paths (no `sysconfig` shell-out) and system-`PATH`
-/// interpreter discovery are out of scope for this phase.
-pub fn detect_python_env(
-    explicit: Option<&Path>,
-    root: &Path,
-) -> Option<(PathBuf, PythonEnvSource)> {
+/// `--env` if given, else `$VIRTUAL_ENV`, else `$CONDA_PREFIX`, else any
+/// directory directly under the scanned root that carries a `pyvenv.cfg`
+/// (the actual PEP 405 marker for "this is a venv" -- catches `env/`,
+/// `venv311/`, etc., not just the literal names `.venv`/`venv`), falling
+/// back to those literal names for a venv that somehow lacks the marker.
+pub fn detect_python_env(explicit: Option<&Path>, root: &Path) -> PythonEnvDetection {
     if let Some(path) = explicit {
-        return Some((path.to_path_buf(), PythonEnvSource::Explicit));
+        return PythonEnvDetection::Found {
+            path: path.to_path_buf(),
+            source: PythonEnvSource::Explicit,
+        };
     }
     if let Some(venv) = non_empty_env_var("VIRTUAL_ENV") {
-        return Some((PathBuf::from(venv), PythonEnvSource::VirtualEnv));
+        return PythonEnvDetection::Found {
+            path: PathBuf::from(venv),
+            source: PythonEnvSource::VirtualEnv,
+        };
     }
     if let Some(conda) = non_empty_env_var("CONDA_PREFIX") {
-        return Some((PathBuf::from(conda), PythonEnvSource::CondaPrefix));
+        return PythonEnvDetection::Found {
+            path: PathBuf::from(conda),
+            source: PythonEnvSource::CondaPrefix,
+        };
     }
+
+    let pyvenv_candidates = find_pyvenv_candidates(root);
+    match pyvenv_candidates.len() {
+        1 => {
+            return PythonEnvDetection::Found {
+                path: pyvenv_candidates.into_iter().next().unwrap(),
+                source: PythonEnvSource::LocalVenv,
+            };
+        }
+        n if n > 1 => return PythonEnvDetection::Ambiguous(pyvenv_candidates),
+        _ => {}
+    }
+
     for name in [".venv", "venv"] {
         let candidate = root.join(name);
         if candidate.is_dir() {
-            return Some((candidate, PythonEnvSource::LocalVenv));
+            return PythonEnvDetection::Found {
+                path: candidate,
+                source: PythonEnvSource::LocalVenv,
+            };
         }
     }
-    None
+    PythonEnvDetection::NotFound
+}
+
+/// Directories directly under `root` carrying a `pyvenv.cfg` marker,
+/// sorted for determinism. Deliberately shallow (not recursive) -- a full
+/// tree walk just to find a venv would be slow on a large repo and risks
+/// matching an unrelated nested venv (e.g. one vendored inside a fixture).
+fn find_pyvenv_candidates(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.join("pyvenv.cfg").is_file())
+        .collect();
+    candidates.sort();
+    candidates
 }
 
 fn non_empty_env_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// Friendly, "what happened / why / what to do next" message for when no
+/// Python environment could be found at all.
+pub fn format_not_found_error(root: &Path) -> String {
+    let virtual_env = non_empty_env_var("VIRTUAL_ENV");
+    let conda_prefix = non_empty_env_var("CONDA_PREFIX");
+    let root_display = root.display();
+
+    format!(
+        "Couldn't find a Python environment for this project.\n\n\
+         scant needs to read your dependencies' installed metadata to map declared \
+         names to imports (e.g. \"PyYAML\" -> \"yaml\") -- there's no reliable way to \
+         do that without them actually being installed somewhere.\n\n\
+         Checked:\n\
+         \x20 ├── $VIRTUAL_ENV   {virtual_env}\n\
+         \x20 ├── $CONDA_PREFIX  {conda_prefix}\n\
+         \x20 └── {root_display}/   no .venv, venv, or other pyvenv.cfg-marked folder\n\n\
+         To fix this:\n\
+         \x20 1. Activate a virtualenv with your dependencies installed, then re-run scant\n\
+         \x20 2. Or point at one directly:    scant {root_display} --env path/to/venv\n\
+         \x20 3. Or point at an interpreter:  scant {root_display} --env path/to/venv/bin/python",
+        virtual_env = virtual_env.map_or_else(
+            || "not set".to_string(),
+            |v| format!("set to '{v}', but that didn't resolve")
+        ),
+        conda_prefix = conda_prefix.map_or_else(
+            || "not set".to_string(),
+            |v| format!("set to '{v}', but that didn't resolve")
+        ),
+    )
+}
+
+/// Friendly message for when more than one directory looks like a venv and
+/// scant refuses to guess which one is meant.
+pub fn format_ambiguous_error(root: &Path, candidates: &[PathBuf]) -> String {
+    let mut tree = String::new();
+    for (i, candidate) in candidates.iter().enumerate() {
+        let name = candidate
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| candidate.display().to_string());
+        let branch = if i + 1 == candidates.len() {
+            "└──"
+        } else {
+            "├──"
+        };
+        tree.push_str(&format!("  {branch} {name}/   has pyvenv.cfg\n"));
+    }
+    let first_name = candidates[0]
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| candidates[0].display().to_string());
+
+    format!(
+        "Found more than one Python environment here -- not sure which one to use.\n\n\
+         {root_display}/\n\
+         {tree}\n\
+         Pick one:   scant {root_display} --env {first_name}",
+        root_display = root.display(),
+    )
 }
 
 #[cfg(test)]
@@ -430,13 +640,30 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// SAFETY: test-only env var manipulation. Rust runs unit tests on multiple
+    /// threads within one process, and env vars are process-global, so tests
+    /// that touch VIRTUAL_ENV/CONDA_PREFIX could race against each other if run
+    /// concurrently. Every such test clears both vars first and doesn't set
+    /// them to anything another test would observe, which keeps this safe in
+    /// practice even without a lock -- worth revisiting if that ever changes.
+    fn clear_env_vars() {
+        unsafe {
+            std::env::remove_var("VIRTUAL_ENV");
+            std::env::remove_var("CONDA_PREFIX");
+        }
+    }
+
     #[test]
     fn detect_python_env_prefers_explicit_over_env_vars() {
         let root = temp_dir("detect-explicit");
         let explicit = PathBuf::from("/explicit/path");
-        let (path, source) = detect_python_env(Some(&explicit), &root).unwrap();
-        assert_eq!(path, explicit);
-        assert_eq!(source, PythonEnvSource::Explicit);
+        match detect_python_env(Some(&explicit), &root) {
+            PythonEnvDetection::Found { path, source } => {
+                assert_eq!(path, explicit);
+                assert_eq!(source, PythonEnvSource::Explicit);
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -444,32 +671,140 @@ mod tests {
     fn detect_python_env_falls_back_to_local_venv_dir() {
         let root = temp_dir("detect-local-venv");
         fs::create_dir_all(root.join(".venv")).unwrap();
+        clear_env_vars();
 
-        // SAFETY: test-only env var manipulation, single-threaded per test process
-        // section (no other test in this module touches these vars concurrently
-        // within the same process run due to Rust's default test isolation being
-        // per-test-thread but env vars being process-global -- acceptable here
-        // since we clear them immediately after).
-        unsafe {
-            std::env::remove_var("VIRTUAL_ENV");
-            std::env::remove_var("CONDA_PREFIX");
+        match detect_python_env(None, &root) {
+            PythonEnvDetection::Found { path, source } => {
+                assert_eq!(path, root.join(".venv"));
+                assert_eq!(source, PythonEnvSource::LocalVenv);
+            }
+            other => panic!("expected Found, got {other:?}"),
         }
-
-        let (path, source) = detect_python_env(None, &root).unwrap();
-        assert_eq!(path, root.join(".venv"));
-        assert_eq!(source, PythonEnvSource::LocalVenv);
 
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn detect_python_env_none_when_nothing_resolves() {
+    fn detect_python_env_not_found_when_nothing_resolves() {
         let root = temp_dir("detect-none");
-        unsafe {
-            std::env::remove_var("VIRTUAL_ENV");
-            std::env::remove_var("CONDA_PREFIX");
-        }
-        assert!(detect_python_env(None, &root).is_none());
+        clear_env_vars();
+        assert_eq!(detect_python_env(None, &root), PythonEnvDetection::NotFound);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn detect_python_env_finds_a_pyvenv_cfg_folder_by_any_name() {
+        let root = temp_dir("detect-pyvenv-cfg");
+        // Not named .venv/venv -- only discoverable via the pyvenv.cfg marker.
+        fs::create_dir_all(root.join("env311")).unwrap();
+        fs::write(root.join("env311").join("pyvenv.cfg"), "").unwrap();
+        clear_env_vars();
+
+        match detect_python_env(None, &root) {
+            PythonEnvDetection::Found { path, source } => {
+                assert_eq!(path, root.join("env311"));
+                assert_eq!(source, PythonEnvSource::LocalVenv);
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn detect_python_env_ambiguous_with_multiple_pyvenv_cfg_folders() {
+        let root = temp_dir("detect-ambiguous");
+        for name in [".venv", "env"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+            fs::write(root.join(name).join("pyvenv.cfg"), "").unwrap();
+        }
+        clear_env_vars();
+
+        match detect_python_env(None, &root) {
+            PythonEnvDetection::Ambiguous(candidates) => {
+                assert_eq!(candidates, vec![root.join(".venv"), root.join("env")]);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn format_not_found_error_mentions_env_flag_and_what_was_checked() {
+        let root = PathBuf::from("/my/project");
+        let msg = format_not_found_error(&root);
+        assert!(msg.contains("Couldn't find a Python environment"));
+        assert!(msg.contains("--env path/to/venv"));
+        assert!(msg.contains("--env path/to/venv/bin/python"));
+    }
+
+    #[test]
+    fn format_ambiguous_error_lists_every_candidate() {
+        let root = PathBuf::from("/my/project");
+        let candidates = vec![root.join(".venv"), root.join("env")];
+        let msg = format_ambiguous_error(&root, &candidates);
+        assert!(msg.contains(".venv/"));
+        assert!(msg.contains("env/"));
+        assert!(msg.contains("--env .venv"));
+    }
+
+    #[cfg(unix)]
+    fn write_fake_interpreter(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_site_packages_via_direct_interpreter_path() {
+        let dir = temp_dir("fake-interpreter-direct");
+        let site_packages = dir.join("fake-site-packages");
+        fs::create_dir_all(&site_packages).unwrap();
+        let interpreter = dir.join("fake-python");
+        write_fake_interpreter(&interpreter, &format!("echo '{}'", site_packages.display()));
+
+        let resolved = resolve_site_packages(&interpreter).unwrap();
+        assert_eq!(resolved, site_packages);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_site_packages_finds_interpreter_inside_venv_bin() {
+        let venv = temp_dir("fake-interpreter-venv-bin");
+        let site_packages = venv.join("fake-site-packages");
+        fs::create_dir_all(&site_packages).unwrap();
+        fs::create_dir_all(venv.join("bin")).unwrap();
+        write_fake_interpreter(
+            &venv.join("bin").join("python3"),
+            &format!("echo '{}'", site_packages.display()),
+        );
+
+        let resolved = resolve_site_packages(&venv).unwrap();
+        assert_eq!(resolved, site_packages);
+
+        fs::remove_dir_all(&venv).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_site_packages_interpreter_failure_is_friendly() {
+        let dir = temp_dir("fake-interpreter-broken");
+        let interpreter = dir.join("broken-python");
+        write_fake_interpreter(&interpreter, "echo 'not a real interpreter' >&2; exit 1");
+
+        let err = resolve_site_packages(&interpreter).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Tried to ask the Python interpreter")
+        );
+        assert!(err.to_string().contains("not a real interpreter"));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
