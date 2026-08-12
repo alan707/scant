@@ -390,64 +390,136 @@ fn non_empty_env_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+/// Looks for a `python3`/`python` interpreter on `$PATH`. Never used for
+/// auto-detection -- a system interpreter isn't tied to this project the way
+/// an activated venv or a local `pyvenv.cfg` folder is, and could have
+/// unrelated packages installed that look like a false match (the same class
+/// of bug the pip/setuptools cold-start fix addressed). Worth *suggesting*
+/// though: installing straight into a container's system Python (no venv at
+/// all) is a common, real setup, and scant should point that out rather than
+/// leave the user to already know the right `--env` value for it.
+fn find_system_python() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        for name in ["python3", "python", "python3.exe", "python.exe"] {
+            let candidate = dir.join(name);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn render_tree(lines: &[String]) -> String {
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        let branch = if i + 1 == lines.len() {
+            "└──"
+        } else {
+            "├──"
+        };
+        out.push_str(&format!("  {branch} {line}\n"));
+    }
+    out
+}
+
 /// Friendly, "what happened / why / what to do next" message for when no
 /// Python environment could be found at all.
 pub fn format_not_found_error(root: &Path) -> String {
     let virtual_env = non_empty_env_var("VIRTUAL_ENV");
     let conda_prefix = non_empty_env_var("CONDA_PREFIX");
+    let system_python = find_system_python();
     let root_display = root.display();
+
+    let mut checked = vec![
+        format!(
+            "$VIRTUAL_ENV   {}",
+            virtual_env.map_or_else(
+                || "not set".to_string(),
+                |v| format!("set to '{v}', but that didn't resolve")
+            )
+        ),
+        format!(
+            "$CONDA_PREFIX  {}",
+            conda_prefix.map_or_else(
+                || "not set".to_string(),
+                |v| format!("set to '{v}', but that didn't resolve")
+            )
+        ),
+        format!("{root_display}/   no .venv, venv, or other pyvenv.cfg-marked folder"),
+    ];
+    if let Some(p) = &system_python {
+        checked.push(format!(
+            "system python  found at {} (not used automatically -- see option 4 below)",
+            p.display()
+        ));
+    }
+
+    let mut steps = vec![
+        "Activate a virtualenv with your dependencies installed, then re-run scant".to_string(),
+        format!("Or point at one directly:    scant {root_display} --env path/to/venv"),
+        format!("Or point at an interpreter:  scant {root_display} --env path/to/venv/bin/python"),
+    ];
+    if let Some(p) = &system_python {
+        steps.push(format!(
+            "Or use the system python found above:  scant {root_display} --env {}",
+            p.display()
+        ));
+    }
+    let steps_text = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("  {}. {s}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     format!(
         "Couldn't find a Python environment for this project.\n\n\
          scant needs to read your dependencies' installed metadata to map declared \
          names to imports (e.g. \"PyYAML\" -> \"yaml\") -- there's no reliable way to \
          do that without them actually being installed somewhere.\n\n\
-         Checked:\n\
-         \x20 ├── $VIRTUAL_ENV   {virtual_env}\n\
-         \x20 ├── $CONDA_PREFIX  {conda_prefix}\n\
-         \x20 └── {root_display}/   no .venv, venv, or other pyvenv.cfg-marked folder\n\n\
-         To fix this:\n\
-         \x20 1. Activate a virtualenv with your dependencies installed, then re-run scant\n\
-         \x20 2. Or point at one directly:    scant {root_display} --env path/to/venv\n\
-         \x20 3. Or point at an interpreter:  scant {root_display} --env path/to/venv/bin/python",
-        virtual_env = virtual_env.map_or_else(
-            || "not set".to_string(),
-            |v| format!("set to '{v}', but that didn't resolve")
-        ),
-        conda_prefix = conda_prefix.map_or_else(
-            || "not set".to_string(),
-            |v| format!("set to '{v}', but that didn't resolve")
-        ),
+         Checked:\n{}\n\
+         To fix this:\n{steps_text}",
+        render_tree(&checked),
     )
 }
 
 /// Friendly message for when more than one directory looks like a venv and
 /// scant refuses to guess which one is meant.
 pub fn format_ambiguous_error(root: &Path, candidates: &[PathBuf]) -> String {
-    let mut tree = String::new();
-    for (i, candidate) in candidates.iter().enumerate() {
-        let name = candidate
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| candidate.display().to_string());
-        let branch = if i + 1 == candidates.len() {
-            "└──"
-        } else {
-            "├──"
-        };
-        tree.push_str(&format!("  {branch} {name}/   has pyvenv.cfg\n"));
-    }
+    let tree_lines: Vec<String> = candidates
+        .iter()
+        .map(|c| {
+            let name = c
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| c.display().to_string());
+            format!("{name}/   has pyvenv.cfg")
+        })
+        .collect();
+    let root_display = root.display();
+
     let first_name = candidates[0]
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| candidates[0].display().to_string());
 
+    let system_python_note = match find_system_python() {
+        Some(p) => format!(
+            "\nA system python is also available, if neither of those is it: \
+             scant {root_display} --env {}\n",
+            p.display()
+        ),
+        None => String::new(),
+    };
+
     format!(
         "Found more than one Python environment here -- not sure which one to use.\n\n\
          {root_display}/\n\
-         {tree}\n\
+         {}{system_python_note}\n\
          Pick one:   scant {root_display} --env {first_name}",
-        root_display = root.display(),
+        render_tree(&tree_lines),
     )
 }
 
@@ -789,6 +861,78 @@ mod tests {
         assert_eq!(resolved, site_packages);
 
         fs::remove_dir_all(&venv).unwrap();
+    }
+
+    /// SAFETY: same category as `clear_env_vars` above -- test-only,
+    /// process-global PATH mutation, restored immediately after use. No
+    /// other test in this module resolves an interpreter by searching PATH
+    /// (they all use absolute paths), so this can't race against them even
+    /// under Rust's default multi-threaded test execution.
+    #[cfg(unix)]
+    fn with_path_override<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let original = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", dir);
+        }
+        let result = f();
+        unsafe {
+            match &original {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_system_python_locates_an_executable_on_path() {
+        let dir = temp_dir("system-python-path");
+        write_fake_interpreter(&dir.join("python3"), "true");
+
+        let found = with_path_override(&dir, find_system_python);
+
+        assert_eq!(found, Some(dir.join("python3")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_system_python_none_when_path_has_no_interpreter() {
+        let dir = temp_dir("system-python-empty-path");
+        let found = with_path_override(&dir, find_system_python);
+        assert_eq!(found, None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn format_not_found_error_suggests_system_python_when_present() {
+        let dir = temp_dir("not-found-suggests-system-python");
+        write_fake_interpreter(&dir.join("python3"), "true");
+
+        let msg = with_path_override(&dir, || {
+            format_not_found_error(&PathBuf::from("/my/project"))
+        });
+
+        assert!(msg.contains("system python"));
+        assert!(msg.contains(&format!("--env {}", dir.join("python3").display())));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn format_ambiguous_error_suggests_system_python_when_present() {
+        let dir = temp_dir("ambiguous-suggests-system-python");
+        write_fake_interpreter(&dir.join("python3"), "true");
+        let root = PathBuf::from("/my/project");
+        let candidates = vec![root.join(".venv"), root.join("env")];
+
+        let msg = with_path_override(&dir, || format_ambiguous_error(&root, &candidates));
+
+        assert!(msg.contains("system python"));
+        assert!(msg.contains(&format!("--env {}", dir.join("python3").display())));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(unix)]
