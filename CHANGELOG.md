@@ -4,6 +4,11 @@ All notable changes to `scant` are documented here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.0.1a4]
+
+### Added
+- The not-found and ambiguous Python-environment errors now also check `$PATH` for a `python3`/`python` interpreter and, if found, list it as an explicit option (e.g. `scant . --env /usr/local/bin/python3`). Never used for auto-detection -- a system interpreter isn't tied to a specific project and could have unrelated packages installed -- but surfaced as a suggestion since installing straight into a container's system Python (no venv at all) is a common, real setup. Found via a real Apache Superset container run, where the ambiguous-env error listed two unrelated leftover venvs but gave no hint that the actual answer was the system Python.
+
 ## [0.0.1a3]
 
 ### Added
