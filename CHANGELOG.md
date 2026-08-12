@@ -4,6 +4,11 @@ All notable changes to `scant` are documented here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.0.1a3]
+
+### Added
+- ASCII-art logo and CI/PyPI-version/license status badges to `README.md`.
+
 ## [0.0.1a2]
 
 ### Added
