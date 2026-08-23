@@ -1038,11 +1038,24 @@ mod tests {
     /// concurrently. Every such test clears both vars first and doesn't set
     /// them to anything another test would observe, which keeps this safe in
     /// practice even without a lock -- worth revisiting if that ever changes.
-    fn clear_env_vars() {
+    // Tests run in parallel threads inside one process, and these helpers mutate process-global environment variables. Without serializing them, one test restores PATH while another is still relying on it -- which is exactly how this suite started failing in CI while passing locally.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // A panicking test poisons the lock, but what it guards is the environment itself, which every helper restores on its own way out.
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    // The returned guard must be held by the caller for the rest of the test, so no other test can change these out from under it. MutexGuard is already #[must_use], so binding it is enforced.
+    fn clear_env_vars() -> std::sync::MutexGuard<'static, ()> {
+        let guard = lock_env();
         unsafe {
             std::env::remove_var("VIRTUAL_ENV");
             std::env::remove_var("CONDA_PREFIX");
         }
+        guard
     }
 
     #[test]
@@ -1063,7 +1076,7 @@ mod tests {
     fn detect_python_env_falls_back_to_local_venv_dir() {
         let root = temp_dir("detect-local-venv");
         fs::create_dir_all(root.join(".venv")).unwrap();
-        clear_env_vars();
+        let _env = clear_env_vars();
 
         match detect_python_env(None, &root) {
             PythonEnvDetection::Found { path, source } => {
@@ -1079,7 +1092,7 @@ mod tests {
     #[test]
     fn detect_python_env_not_found_when_nothing_resolves() {
         let root = temp_dir("detect-none");
-        clear_env_vars();
+        let _env = clear_env_vars();
         assert_eq!(detect_python_env(None, &root), PythonEnvDetection::NotFound);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -1090,7 +1103,7 @@ mod tests {
         // Not named .venv/venv -- only discoverable via the pyvenv.cfg marker.
         fs::create_dir_all(root.join("env311")).unwrap();
         fs::write(root.join("env311").join("pyvenv.cfg"), "").unwrap();
-        clear_env_vars();
+        let _env = clear_env_vars();
 
         match detect_python_env(None, &root) {
             PythonEnvDetection::Found { path, source } => {
@@ -1110,7 +1123,7 @@ mod tests {
             fs::create_dir_all(root.join(name)).unwrap();
             fs::write(root.join(name).join("pyvenv.cfg"), "").unwrap();
         }
-        clear_env_vars();
+        let _env = clear_env_vars();
 
         match detect_python_env(None, &root) {
             PythonEnvDetection::Ambiguous(candidates) => {
@@ -1190,6 +1203,7 @@ mod tests {
     /// under Rust's default multi-threaded test execution.
     #[cfg(unix)]
     fn with_path_override<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let _env = lock_env();
         let original = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("PATH", dir);
