@@ -44,7 +44,7 @@ Written against `main` @ `55ecef3`. Two things landed after this design was firs
 │ droppable   78 deps · 310 MB           ││                                       │
 │ inlineable  23 deps · 195 MB           ││                                       │
 └────────────────────────────────────────┘└───────────────────────────────────────┘
- tab switch pane · / filter · enter edit usage in $EDITOR · ? help · q quit
+ tab switch pane · j/k move · space expand · / filter · ? help · q quit
 ```
 
 *(Sizes illustrative — not measured.)*
@@ -115,38 +115,20 @@ Reuse the `ruff_python_parser` + `Visitor` pattern already in `parse.rs`:
 
 **Laziness is load-bearing:** resolve only for the selected row, memoized per dependency — never for all 165 up front. Keeps CLAUDE.md's "expensive work runs on the suspect set, not the tree" intact.
 
-## Editing model — read-only panes + full-screen handoff
+## Read-only by design
 
-**Both right panes are read-only.** Editing happens by suspending the TUI and handing the whole terminal to `$EDITOR`, then returning. Three reasons this beats embedding an editable pane:
+**scant never modifies anything.** It reads a report, and it reads source files to display them. There is no editing in the panes, no `$EDITOR` handoff, no subprocess spawned to open anything. The tool shows you the lines you'd delete next to the code you'd copy; making the change is your business, in your own editor, in your own window.
 
-- **No terminal emulation.** Embedding a live editable vim is possible (`tui-term` over `portable-pty` + `vt100`), but terminal-in-terminal is where this class of project reliably gets stuck: vim drives its own alternate screen (so we'd nest alt-screens), `Esc` disambiguation against escape sequences is unsolved in practice and vim leans on `Esc` constantly, plus `SIGWINCH` propagation, bracketed paste, mouse and true-color passthrough. dive doesn't do it; neither does k9s, lazygit, or `gh dash`.
+This is a scope decision, not a limitation to work around, and it buys a lot:
+
+- **No terminal emulation.** An editable pane means embedding a PTY (`tui-term` over `portable-pty` + `vt100`), which is where this class of project reliably gets stuck: vim drives its own alternate screen (nested alt-screens), `Esc` disambiguation against escape sequences is unsolved in practice and vim leans on `Esc` constantly, plus `SIGWINCH` propagation, bracketed paste, mouse and true-color passthrough. dive doesn't do it; neither does k9s or lazygit.
+- **No handoff machinery either.** No per-editor argv translation (every editor spells "open at line N" differently), no `$EDITOR` word-splitting, no suspend/restore dance around the alternate screen and raw mode.
 - **The keymap stays global.** An editable pane forces a focus model where `q` can't mean quit and `/` can't mean filter.
-- **The definition pane *must* be read-only anyway.** It points into site-packages, so an editable pane there is one keystroke from editing an installed package — a change that "works" locally and silently evaporates on the next `pip install`. Read-only removes the footgun entirely; to reuse the code you copy it out, which is what inlining is.
+- **No footgun on the definition pane.** It points into site-packages; an editable pane there is one keystroke from editing an installed package, a change that "works" locally and silently evaporates on the next `pip install`.
+- **The whole UI stays snapshot-testable** via `TestBackend`, which a live PTY would not be.
+- **scant keeps its identity** as a linter you can drop into CI, not an IDE.
 
-It also keeps the whole UI snapshot-testable via `TestBackend`, which a live PTY would not be.
-
-### Keeping the report fresh
-
-The one thing dive never has to solve: **its images are immutable, our files are not.** The moment you inline a dependency and delete the import, every number on screen is wrong.
-
-Two cases, handled differently — the distinction being whether the change was *expected*:
-
-**You edited via `Enter` → silent re-scan, no dialog.** Returning from `$EDITOR` is an exact, unambiguous moment: compare the file's mtime across the handoff, and if it changed, just refresh. A modal exists to guard an expensive or disruptive action, and re-analysis is ~0.2s even on Superset — asking permission would cost more attention than the work it's guarding. Quitting the editor without saving leaves mtime untouched and does nothing.
-
-**Something changed it elsewhere → dialog.** An unannounced refresh that reshuffles the screen while you're reading it is disorienting, so this case announces itself:
-
-```
-┌─ superset/utils/pandas_postprocessing/prophet.py ───────┐
-│  Changed on disk since scant last read it.              │
-│    [r] re-scan    [c] keep showing                      │
-└─────────────────────────────────────────────────────────┘
-```
-
-Detection is deliberately narrow: poll the mtime of **only the files currently displayed** (the usage file and the definition file — two `stat` calls) on the event loop's idle tick. `crossterm`'s `event::poll(timeout)` already provides that tick, so this needs no watcher crate, no background thread, and no debouncing of editor temp-file/atomic-rename churn.
-
-The honest limitation: this catches edits to what you're looking at, not edits elsewhere in the tree that would shift totals. Full coverage means a real filesystem watcher (`notify`), which is a much bigger hammer — deferred until narrow polling proves insufficient.
-
-**Both paths share one requirement:** re-scan must **preserve selection by package name, not by index**. A dependency may shift verdict groups or vanish from the report entirely — the latter being precisely the outcome you were hoping for — and an index-based restore would silently land on an arbitrary neighbor.
+Staleness follows from this too: if scant can't change your files, a report can only go stale because you edited elsewhere — and that's explicitly **not handled in v1**. No mtime polling, no filesystem watcher, no refresh dialog. Quit and re-run. Revisit only if it proves annoying in practice.
 
 ## New: `crates/scant-cli/src/tui/`
 
@@ -155,8 +137,8 @@ The honest limitation: this catches edits to what you're looking at, not edits e
 - **`tui/app.rs`** — pure state machine: selected dependency, focused pane, tree expand/collapse, filter, memoized definition lookups. No ratatui, no I/O.
 - **`tui/tree.rs`** — pure: flatten `DepReport.locations` paths into a renderable directory tree with collapse state.
 - **`tui/render.rs`** — `fn draw(frame: &mut Frame, app: &App)`; pure state → frame, testable headlessly via `TestBackend`.
-- **`tui/editor.rs`** — pure `fn editor_command(editor: &str, file: &Path, line: u32) -> Vec<OsString>`. No spawning.
-- **`tui/mod.rs`** — the only terminal-touching part: setup/teardown, event loop, editor suspend/resume.
+- **`tui/source.rs`** — pure: read a file and return the window of lines to display around a target, with bounds clamping for files shorter than the window.
+- **`tui/mod.rs`** — the only terminal-touching part: setup/teardown and the event loop.
 
 Reuse rather than reimplement: `analyze::{Verdict, UsageBand, DepReport}` for grouping and ordering, and mirror `report.rs`'s palette exactly — red/yellow/green for drop/inline/keep, **dim for registered and unknown**.
 
@@ -166,41 +148,25 @@ Add `--interactive` to the existing flat `Cli` struct — **no subcommand**; `sc
 
 Guard: if stdout isn't a TTY (piped, CI), fail fast with a what/why/next-step message rather than garbling or hanging — `std::io::IsTerminal`, std, no new dep. Preserve the documented `0` clean / `1` findings exit contract on quit.
 
-## Editor integration
+## Reading source files
 
-Pressing `Enter` opens *your* editor at that exact file and line, then returns you to the TUI where you left off. There's no standard for "open at line N", so dispatch on the **basename** of `$VISUAL` then `$EDITOR`:
+One gotcha worth stating, since it's the only path resolution in the feature: **`locations` paths are relative to the scan root** (`build_dep_report` strips the prefix, but falls back to the absolute path if stripping fails). Resolve as: absolute → use as-is, else `scan_root.join(rel)`. Don't blindly join.
 
-| Editor | Form |
-|---|---|
-| vim, nvim, vi, nano, emacs, kak | `EDITOR +LINE FILE` |
-| code, code-insiders, codium | `EDITOR -g FILE:LINE` |
-| subl, hx, zed | `EDITOR FILE:LINE` |
-| idea, pycharm | `EDITOR --line LINE FILE` |
-| *unknown* | `EDITOR FILE` (opens the file, no jump) |
+Definition paths from `defsite.rs` are already absolute (rooted at site-packages) and need no resolution.
 
-Escape hatch: `SCANT_EDITOR_CMD="myeditor --at {line} {file}"`.
-
-Two real constraints:
-
-- **Spawn via `Command::new(prog).args(...)`, never a shell** — same posture as the existing `sysconfig` call. `$EDITOR` may carry flags (`EDITOR="code -w"`), so split on whitespace: first token is the program, rest are leading args. Documented limitation: `$EDITOR` paths containing spaces won't parse.
-- **`locations` paths are relative to the scan root** (`build_dep_report` strips the prefix but falls back to the absolute path if stripping fails). Resolve as: absolute → use as-is, else `scan_root.join(rel)`. Don't blindly join.
+Files that can't be read — deleted since the scan, permissions, or not valid UTF-8 — show an inline note in the pane rather than erroring out or panicking. Same posture as the existing "one unparseable file is a warning" rule.
 
 ## Terminal lifecycle
 
-The two failure modes that make a TUI feel broken:
-
-- **Editor handoff** — leave the alternate screen and disable raw mode *before* spawning, wait, then re-enter and force a full redraw. Skip this and vim renders into a corrupted screen.
-- **Panic** — a panic in raw mode leaves the user's shell unusable. Install a restoring panic hook (`ratatui::init()`/`restore()` do this in 0.30). Same for Ctrl-C.
+With no editor handoff, exactly one failure mode remains: **a panic in raw mode leaves the user's shell unusable.** Install a restoring panic hook (`ratatui::init()`/`restore()` do this in 0.30), and handle Ctrl-C the same way.
 
 ## Keybindings (dive-flavored)
 
-`Tab` cycle focused pane — dependencies → usage → definition (dive's core interaction) · `j`/`k`/`↑`/`↓` move or scroll the focused pane · `g`/`G` top/bottom · `Ctrl-d`/`Ctrl-u` half-page · `Space` expand/collapse tree node · `Enter` edit the usage site in `$EDITOR` · `/` filter, `Esc` clears · `?` help · `q`/`Ctrl-C` quit.
+`Tab` cycle focused pane — dependencies → usage → definition (dive's core interaction) · `j`/`k`/`↑`/`↓` move or scroll the focused pane · `g`/`G` top/bottom · `Ctrl-d`/`Ctrl-u` half-page · `Space` expand/collapse tree node · `/` filter, `Esc` clears · `?` help · `q`/`Ctrl-C` quit.
 
 Group filters, one per verdict plus all: `0` all · `1` drop · `2` inline · `3` registered · `4` unknown · `5` keep. Numeric switching follows dive/k9s and sidesteps the collision with `k` = up.
 
-While the changed-on-disk dialog is up it captures all input: `r` re-scan · `c` keep showing. Nothing else is live until it's dismissed. (Edits made through `Enter` never raise it — they re-scan silently.)
-
-`Enter` always targets the **usage site**, never the definition — the definition lives in site-packages and is deliberately not editable.
+`Enter` is deliberately left unbound — there is nothing to open, and binding it to something incidental would invite the expectation that scant edits files.
 
 ## Testing
 
@@ -210,14 +176,12 @@ While the changed-on-disk dialog is up it captures all input: `r` re-scan · `c`
 - `namemap.rs` — size summing: normal `RECORD`, rows with an empty size field, editable install with no payload → `None` not `0`.
 - `tui/tree.rs` — path list → tree shape, shared prefixes, single file, deep nesting, collapse state.
 - `tui/app.rs` — selection clamping at both ends, filter narrows and `Esc` restores, group switch resets selection sanely, pane focus cycling through all three, empty filter result doesn't panic.
-- `tui/app.rs` (re-scan) — selection is restored **by package name across a re-scan**, including the cases that matter: the selected dependency changed verdict group, and the selected dependency disappeared from the report entirely (the success case for inlining) — neither may panic or leave selection dangling.
-- `tui/render.rs` — insta snapshots of `TestBackend` buffers, **one per verdict variant (all five)**, plus one with the changed-on-disk dialog up, locking layout the way `report.rs`'s snapshot does.
-- `tui/editor.rs` — table test across every editor form above, unknown fallback, `SCANT_EDITOR_CMD`.
-- Freshness gating — a pure function over a timestamp pair plus the change's origin: editor-return + mtime unchanged ⇒ nothing; editor-return + mtime changed ⇒ silent re-scan; idle-tick + mtime changed ⇒ dialog. No real editor or filesystem events needed.
+- `tui/render.rs` — insta snapshots of `TestBackend` buffers, **one per verdict variant (all five)**, locking layout the way `report.rs`'s snapshot does.
+- `tui/source.rs` — line window around a target, clamped: target near the top of a file, near the end, file shorter than the window, empty file, unreadable file yields the inline note rather than a panic.
 
 ## Risk summary
 
-Most of this is routine: split panes, tables, trees, and file previews are what ratatui exists for; suspend-to-`$EDITOR` is well-trodden; the size work sums a field already parsed; the core changes are additive fields.
+Most of this is routine: split panes, tables, trees, and file previews are what ratatui exists for; the size work sums a field already parsed; the core changes are additive fields. Staying read-only removes the two genuinely hairy areas outright — no PTY, and no subprocess/terminal-suspend choreography.
 
 **`defsite.rs` is the one piece that could disappoint** — nothing in the ecosystem does static go-to-definition from Rust into installed Python packages. It's de-risked by construction (a miss degrades to a note, never a wrong answer), but build it **first, standalone, with tests, against real site-packages** before any TUI code, while course-correcting is still cheap.
 
@@ -228,12 +192,12 @@ Most of this is routine: split panes, tables, trees, and file previews are what 
 1. `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` (Docker `rust:latest` — no local toolchain).
 2. Non-interactive path untouched: existing snapshots pass, `scant .` output byte-identical, mkdocs CI smoke test green.
 3. Measure the wheel-size delta from ratatui+crossterm against the current ~4.6 MB; feature-gate as `default = ["tui"]` only if material.
-4. Real TTY run (`docker run -it`; piped runs can't exercise it) against mkdocs, then Superset's 165 rows — the readability stress test. Confirm specifically: `prophet`'s details panel resolves `Prophet` to its `class` definition; a `registered` dependency (Superset has many) shows its loading mechanism; reported sizes are sane against `du -sh` on the same site-packages.
-5. Editor round-trip with `vim` and `code`, verifying the terminal is restored intact afterward *and* after a forced panic.
+4. Real TTY run (`docker run -it`; piped runs can't exercise it) against mkdocs, then Superset's 165 rows — the readability stress test. Confirm specifically: `prophet`'s definition pane resolves `Prophet` to its `class` definition; a `registered` dependency (Superset has many) shows its loading mechanism; reported sizes are sane against `du -sh` on the same site-packages.
+5. Confirm the terminal is restored intact after `q`, after Ctrl-C, and after a deliberately forced panic.
 
 ## Out of scope (follow-ups)
 
-Transitive installed weight (needs a dependency graph) · per-line usage sites beyond the first per file (needs `build_dep_report` to stop collapsing each file's lines to their minimum) · syntax highlighting (`syntect` is heavy; v1 dims context and emphasizes the target line, keeping color additive per CLAUDE.md) · clipboard yank of the definition (the obvious next step for the inline workflow, deliberately deferred until the read-only layout proves itself) · live threshold tuning · mouse support.
+Any form of editing — `$EDITOR` handoff or an embedded editable pane · staleness detection and re-scan (moot while read-only) · clipboard yank of the definition (the obvious next step for the inline workflow once the layout proves itself) · transitive installed weight (needs a dependency graph) · per-line usage sites beyond the first per file (needs `build_dep_report` to stop collapsing each file's lines to their minimum) · syntax highlighting (`syntect` is heavy; v1 dims context and emphasizes the target line, keeping color additive per CLAUDE.md) · live threshold tuning · mouse support.
 
 ## Critical files
 
@@ -241,6 +205,6 @@ Transitive installed weight (needs a dependency graph) · per-line usage sites b
 - `crates/scant-core/src/analyze.rs` — additive fields (`symbol_names`, `import_roots`, `installed_bytes` on `DepReport`; `site_packages` on `Report`)
 - `crates/scant-core/src/defsite.rs` — **new**, static definition finder + tests
 - `crates/scant-core/src/lib.rs` — register `defsite`
-- `crates/scant-cli/src/tui/{mod,app,tree,render,editor}.rs` — **new**
+- `crates/scant-cli/src/tui/{mod,app,tree,render,source}.rs` — **new**
 - `crates/scant-cli/src/main.rs` — `--interactive`, TTY guard, dispatch
 - `Cargo.toml` (root) — `ratatui`/`crossterm` in `[workspace.dependencies]`; `crates/scant-cli/Cargo.toml` — `{ workspace = true }` refs plus `insta` dev-dep
