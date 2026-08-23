@@ -479,6 +479,10 @@ fn installed_command_name(path_field: &str) -> Option<String> {
             if segments.peek().is_some() {
                 return None;
             }
+            // A `.py` file in bin/ comes from setup.py's legacy `scripts=` list -- typically a demo or helper (xlrd ships `runxlrd.py`), not the reason anyone depends on the package. Real console entry points install as extensionless launchers, so counting these would suppress genuine findings on evidence that doesn't support them.
+            if segment.ends_with(".py") {
+                return None;
+            }
             let name = segment
                 .strip_suffix(".exe")
                 .or_else(|| segment.strip_suffix(".EXE"))
@@ -840,6 +844,8 @@ mod tests {
         assert_eq!(installed_command_name("../../../bin/share/thing"), None);
         // A path escaping site-packages for some other reason is not a command.
         assert_eq!(installed_command_name("../../../etc/jupyter/config"), None);
+        // A legacy setup.py `scripts=` entry is a helper, not a console entry point -- xlrd's real shape.
+        assert_eq!(installed_command_name("../../../bin/runxlrd.py"), None);
     }
 
     #[test]
