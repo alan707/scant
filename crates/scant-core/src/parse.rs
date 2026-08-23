@@ -35,6 +35,11 @@ pub struct FileUsage {
     pub path: PathBuf,
     /// import root -> usage record, for every non-first-party root touched.
     pub records: HashMap<String, ImportRecord>,
+    /// Import roots named in a string literal in this file, mapped to the
+    /// first line naming them. Django loads apps, middleware and storage
+    /// backends by dotted string from `settings.py` and never imports them,
+    /// so a string is the only evidence such a dependency is in use.
+    pub string_refs: HashMap<String, u32>,
     /// Import roots pulled in via `from x import *` in this file. A wildcard
     /// import creates no bindings (we can't attribute usage to it), so
     /// `analyze.rs` forces `Verdict::Keep` for any dependency in this set
@@ -89,6 +94,9 @@ impl LineIndex {
 
 struct FileVisitor<'a> {
     first_party: &'a HashSet<String>,
+    // Passed in rather than collected wholesale: a project has a few hundred declared import roots and tens of thousands of string literals, so matching as we walk keeps this to the roots that could ever matter.
+    declared_roots: &'a HashSet<String>,
+    string_refs: HashMap<String, u32>,
     bindings: HashMap<String, Binding>,
     records: HashMap<String, ImportRecord>,
     wildcard: HashSet<String>,
@@ -232,9 +240,33 @@ impl<'a> Visitor<'a> for FileVisitor<'a> {
                 }
                 visitor::walk_expr(self, expr);
             }
+            // A string naming a declared dependency's import root: `"django_prometheus"` in INSTALLED_APPS, `"whitenoise.middleware.WhiteNoiseMiddleware"` in MIDDLEWARE. Recorded separately from real usage -- it never counts toward line or symbol totals, it only answers "is this loaded by name somewhere".
+            Expr::StringLiteral(string_expr) => {
+                let value = string_expr.value.to_str();
+                if is_dotted_identifier(value) {
+                    let root = root_segment(value);
+                    if self.declared_roots.contains(root) {
+                        let line = self.line_index.line_number(string_expr.range.start());
+                        self.string_refs.entry(root.to_string()).or_insert(line);
+                    }
+                }
+                visitor::walk_expr(self, expr);
+            }
             _ => visitor::walk_expr(self, expr),
         }
     }
+}
+
+// Only strings shaped like a module path can be one. Keeps prose, URLs and SQL out: "please install django_prometheus" is not a reference to it.
+fn is_dotted_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|segment| {
+            !segment.is_empty()
+                && !segment.starts_with(|c: char| c.is_ascii_digit())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
 }
 
 /// Extracts import/usage data from already-read source text. Split out from
@@ -243,11 +275,14 @@ pub fn analyze_source(
     path: &Path,
     source: &str,
     first_party: &HashSet<String>,
+    declared_roots: &HashSet<String>,
 ) -> Option<FileUsage> {
     let parsed = ruff_python_parser::parse_module(source).ok()?;
 
     let mut file_visitor = FileVisitor {
         first_party,
+        declared_roots,
+        string_refs: HashMap::new(),
         bindings: HashMap::new(),
         records: HashMap::new(),
         wildcard: HashSet::new(),
@@ -261,15 +296,20 @@ pub fn analyze_source(
     Some(FileUsage {
         path: path.to_path_buf(),
         records: file_visitor.records,
+        string_refs: file_visitor.string_refs,
         wildcard: file_visitor.wildcard,
     })
 }
 
 /// Reads and analyzes one file. Returns `None` on a read or parse failure --
 /// the caller treats that as a warning, not an error, and keeps going.
-pub fn analyze_file(path: &Path, first_party: &HashSet<String>) -> Option<FileUsage> {
+pub fn analyze_file(
+    path: &Path,
+    first_party: &HashSet<String>,
+    declared_roots: &HashSet<String>,
+) -> Option<FileUsage> {
     let source = std::fs::read_to_string(path).ok()?;
-    analyze_source(path, &source, first_party)
+    analyze_source(path, &source, first_party, declared_roots)
 }
 
 #[cfg(test)]
@@ -281,13 +321,19 @@ mod tests {
     }
 
     fn analyze(source: &str) -> FileUsage {
-        analyze_source(Path::new("test.py"), source, &no_first_party())
-            .expect("valid python should parse")
+        analyze_source(
+            Path::new("test.py"),
+            source,
+            &no_first_party(),
+            &HashSet::new(),
+        )
+        .expect("valid python should parse")
     }
 
     fn analyze_with_first_party(source: &str, first_party: &[&str]) -> FileUsage {
         let fp: HashSet<String> = first_party.iter().map(|s| s.to_string()).collect();
-        analyze_source(Path::new("test.py"), source, &fp).expect("valid python should parse")
+        analyze_source(Path::new("test.py"), source, &fp, &HashSet::new())
+            .expect("valid python should parse")
     }
 
     #[test]
@@ -378,6 +424,48 @@ mod tests {
     }
 
     #[test]
+    fn a_string_naming_a_declared_root_is_recorded_with_its_line() {
+        // Django's real shape: the app is listed by name and the middleware by dotted path, and neither is ever imported.
+        let source = "INSTALLED_APPS = [\n    \"django_prometheus\",\n]\nMIDDLEWARE = [\n    \"whitenoise.middleware.WhiteNoiseMiddleware\",\n]\n";
+        let declared = ["django_prometheus", "whitenoise"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let usage = analyze_source(
+            Path::new("settings.py"),
+            source,
+            &no_first_party(),
+            &declared,
+        )
+        .unwrap();
+
+        assert_eq!(usage.string_refs.get("django_prometheus"), Some(&2));
+        assert_eq!(usage.string_refs.get("whitenoise"), Some(&5));
+        // A string is not usage: it must never contribute lines or symbols.
+        assert!(usage.records.is_empty());
+    }
+
+    #[test]
+    fn strings_that_are_not_module_paths_are_ignored() {
+        let declared = ["requests", "django_prometheus"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let source = "a = \"please install django_prometheus\"\nb = \"https://requests.example.com/x\"\nc = \"requests \"\n";
+        let usage =
+            analyze_source(Path::new("t.py"), source, &no_first_party(), &declared).unwrap();
+
+        assert!(usage.string_refs.is_empty());
+    }
+
+    #[test]
+    fn a_string_naming_an_undeclared_root_is_not_recorded() {
+        let usage = analyze("x = \"colorama.init\"\n");
+
+        assert!(usage.string_refs.is_empty());
+    }
+
+    #[test]
     fn stdlib_import_is_recorded_like_any_other_root() {
         // parse.rs doesn't know about stdlib; that's analyze.rs's job when
         // it consults the namemap. Here we just confirm nothing special
@@ -432,7 +520,12 @@ mod tests {
 
     #[test]
     fn unparseable_source_returns_none() {
-        let result = analyze_source(Path::new("bad.py"), "def broken(:\n", &no_first_party());
+        let result = analyze_source(
+            Path::new("bad.py"),
+            "def broken(:\n",
+            &no_first_party(),
+            &HashSet::new(),
+        );
         assert!(result.is_none());
     }
 
@@ -441,6 +534,7 @@ mod tests {
         let result = analyze_file(
             Path::new("/nonexistent/path/does-not-exist.py"),
             &no_first_party(),
+            &HashSet::new(),
         );
         assert!(result.is_none());
     }

@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use pep508_rs::{MarkerEnvironment, MarkerEnvironmentBuilder, PackageName};
@@ -18,6 +19,8 @@ pub struct NameMap {
     dist_entry_points: HashMap<PackageName, EntryPoints>,
     // Every distribution whose metadata directory is present, whether or not we could determine its import names. Distinguishes "not installed" from "installed but we can't read it" -- a metapackage that ships no modules, or legacy `.egg-info` metadata.
     dists_present: HashSet<PackageName>,
+    // Required package -> the distributions that declare it behind an `extra ==` marker.
+    dist_extra_requires: HashMap<PackageName, BTreeSet<PackageName>>,
 }
 
 // Entry points a distribution registers in `entry_points.txt`. Anything registering one is loaded by name at runtime -- a framework resolving a plugin, or a shell running a command -- so zero imports is expected, not unused. See CLAUDE.md non-negotiable #4.
@@ -80,6 +83,11 @@ impl NameMap {
     // Entry points this distribution registers, if it registers any.
     pub fn entry_points_for(&self, dist: &PackageName) -> Option<&EntryPoints> {
         self.dist_entry_points.get(dist)
+    }
+
+    // Distributions declaring `dist` behind an `extra ==` marker -- an optional backend or driver they select at runtime.
+    pub fn extra_providers_for(&self, dist: &PackageName) -> Option<&BTreeSet<PackageName>> {
+        self.dist_extra_requires.get(dist)
     }
 
     pub fn len(&self) -> usize {
@@ -323,12 +331,14 @@ pub fn build(site_packages: &Path) -> NameMap {
     let mut dist_imports: HashMap<PackageName, BTreeSet<String>> = HashMap::new();
     let mut dist_entry_points: HashMap<PackageName, EntryPoints> = HashMap::new();
     let mut dists_present: HashSet<PackageName> = HashSet::new();
+    let mut dist_extra_requires: HashMap<PackageName, BTreeSet<PackageName>> = HashMap::new();
 
     let Ok(entries) = std::fs::read_dir(site_packages) else {
         return NameMap {
             dist_imports,
             dist_entry_points,
             dists_present,
+            dist_extra_requires,
         };
     };
 
@@ -367,6 +377,13 @@ pub fn build(site_packages: &Path) -> NameMap {
                 .extend(import_roots);
         }
 
+        for required in read_extra_requirements(&entry.path()) {
+            dist_extra_requires
+                .entry(required)
+                .or_default()
+                .insert(package_name.clone());
+        }
+
         let mut entry_points = read_entry_points(&entry.path());
         entry_points.installed_commands = installed_commands;
         if !entry_points.is_empty() {
@@ -378,7 +395,41 @@ pub fn build(site_packages: &Path) -> NameMap {
         dist_imports,
         dist_entry_points,
         dists_present,
+        dist_extra_requires,
     }
+}
+
+// Requirements a distribution declares behind an `extra ==` marker: the optional backends it can load at runtime but never imports unconditionally. SQLAlchemy names `psycopg2-binary`, `PyMySQL` and `pymssql` this way, and that metadata is the only on-disk evidence that a project's unimported database driver is reached through SQLAlchemy's own dialects rather than dead.
+fn read_extra_requirements(dist_info_dir: &Path) -> BTreeSet<PackageName> {
+    let mut found = BTreeSet::new();
+    let Ok(file) = std::fs::File::open(dist_info_dir.join("METADATA")) else {
+        return found;
+    };
+
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        // METADATA is RFC 822: headers, a blank line, then the entire README. Stopping at the blank line avoids reading 100 KB of description to find a handful of headers.
+        if line.is_empty() {
+            break;
+        }
+        let Some((requirement, marker)) = line
+            .strip_prefix("Requires-Dist:")
+            .and_then(|value| value.split_once(';'))
+        else {
+            continue;
+        };
+        // Only extra-gated requirements count. A plain `Requires-Dist` is an ordinary transitive dependency -- half of site-packages requires `requests` -- and matching those would suppress genuine findings.
+        if !marker.replace(' ', "").contains("extra==") {
+            continue;
+        }
+        let name = requirement.trim();
+        let end = name
+            .find(['[', '(', '<', '>', '=', '!', '~', ' '])
+            .unwrap_or(name.len());
+        if let Ok(package_name) = PackageName::new(name[..end].to_string()) {
+            found.insert(package_name);
+        }
+    }
+    found
 }
 
 // `.egg-info` dirnames are either `name-version` or a bare `name`, unlike `.dist-info` which always carries a version.
@@ -805,6 +856,43 @@ mod tests {
         fs::write(dir.join("entry_points.txt"), "[console_scripts]\n\n").unwrap();
 
         assert!(read_entry_points(&dir).is_empty());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn extra_gated_requirements_are_read_and_plain_ones_ignored() {
+        let dir = temp_dir("extra-requires");
+        fs::create_dir_all(&dir).unwrap();
+        // SQLAlchemy's real shape: the drivers behind extras, plus one unconditional requirement and a marker that has nothing to do with extras.
+        fs::write(
+            dir.join("METADATA"),
+            "Name: SQLAlchemy\n\
+             Requires-Dist: typing-extensions>=4.6.0\n\
+             Requires-Dist: greenlet>=1; python_version < \"3.11\"\n\
+             Requires-Dist: psycopg2-binary; extra == \"postgresql-psycopg2binary\"\n\
+             Requires-Dist: pymssql; extra == \"mssql-pymssql\"\n\
+             Requires-Dist: psycopg[binary]>=3.0.7; extra == \"postgresql-psycopgbinary\"\n\
+             \n\
+             Requires-Dist: not-a-header; extra == \"this is past the blank line\"\n",
+        )
+        .unwrap();
+
+        let found: Vec<String> = read_extra_requirements(&dir)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(found, ["psycopg", "psycopg2-binary", "pymssql"]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_metadata_is_not_an_error() {
+        let dir = temp_dir("extra-requires-absent");
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(read_extra_requirements(&dir).is_empty());
 
         fs::remove_dir_all(&dir).unwrap();
     }

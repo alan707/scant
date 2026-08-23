@@ -47,6 +47,10 @@ pub enum Verdict {
 pub struct Signals {
     pub is_wildcard: bool,
     pub registers_entry_points: bool,
+    // Whether some string literal in the project names this distribution's import root -- Django's INSTALLED_APPS and MIDDLEWARE load by dotted name, never by import.
+    pub named_by_string: bool,
+    // Whether a distribution the project actually imports declares this one behind an `extra ==` marker -- the database-driver case, where the import lives inside the provider rather than in the project.
+    pub provided_as_extra: bool,
     pub installable_here: bool,
     // Whether the distribution was actually found in the environment. `drop` is a destructive recommendation, so it requires positive confirmation the package is there and unimported -- never merely that we failed to find it.
     pub installed: bool,
@@ -58,6 +62,8 @@ impl Default for Signals {
         Signals {
             is_wildcard: false,
             registers_entry_points: false,
+            named_by_string: false,
+            provided_as_extra: false,
             installable_here: true,
             installed: true,
         }
@@ -170,18 +176,33 @@ pub fn analyze(
     }
 
     let first_party = discover::first_party_packages(root);
+    // Every import root any declared dependency owns. The parser matches string literals against this as it walks, so a project's tens of thousands of strings never have to be collected.
+    let declared_roots: HashSet<String> = manifest
+        .dependencies
+        .iter()
+        .filter_map(|dep| name_map.imports_for(&dep.name))
+        .flatten()
+        .cloned()
+        .collect();
     let files = discover::walk(root);
     let files_scanned = files.len();
 
     let file_usages: Vec<FileUsage> = files
         .par_iter()
-        .filter_map(|path| parse::analyze_file(path, &first_party))
+        .filter_map(|path| parse::analyze_file(path, &first_party, &declared_roots))
         .collect();
 
-    let wildcard_roots: HashSet<String> = file_usages
-        .iter()
-        .flat_map(|usage| usage.wildcard.iter().cloned())
-        .collect();
+    let usage = ProjectUsage {
+        wildcard_roots: file_usages
+            .iter()
+            .flat_map(|usage| usage.wildcard.iter().cloned())
+            .collect(),
+        used_roots: file_usages
+            .iter()
+            .flat_map(|usage| usage.records.keys().map(String::as_str))
+            .collect(),
+        files: &file_usages,
+    };
 
     let mut deps: Vec<DepReport> = manifest
         .dependencies
@@ -190,8 +211,7 @@ pub fn analyze(
             build_dep_report(
                 dep,
                 &name_map,
-                &file_usages,
-                &wildcard_roots,
+                &usage,
                 &thresholds,
                 marker_env.as_ref(),
                 root,
@@ -209,11 +229,18 @@ pub fn analyze(
     })
 }
 
+// What the file scan learned about the project, grouped so classifying one dependency takes a single reference rather than three parallel arguments.
+struct ProjectUsage<'a> {
+    files: &'a [FileUsage],
+    wildcard_roots: HashSet<String>,
+    // Import roots the project actually uses, for deciding whether a distribution that provides an optional backend is itself in play.
+    used_roots: HashSet<&'a str>,
+}
+
 fn build_dep_report(
     dep: &Dependency,
     name_map: &NameMap,
-    file_usages: &[FileUsage],
-    wildcard_roots: &HashSet<String>,
+    usage: &ProjectUsage,
     thresholds: &Thresholds,
     marker_env: Option<&MarkerEnvironment>,
     scan_root: &Path,
@@ -226,10 +253,10 @@ fn build_dep_report(
     let mut files_with_usage: HashSet<&PathBuf> = HashSet::new();
     let mut locations: Vec<(String, u32)> = Vec::new();
 
-    for usage in file_usages {
+    for file in usage.files {
         let mut min_line: Option<u32> = None;
         for import_root in &import_roots {
-            let Some(record) = usage.records.get(import_root) else {
+            let Some(record) = file.records.get(import_root) else {
                 continue;
             };
             imports += record.import_statements;
@@ -240,11 +267,11 @@ fn build_dep_report(
             }
         }
         if let Some(line) = min_line {
-            files_with_usage.insert(&usage.path);
-            let display_path = usage
+            files_with_usage.insert(&file.path);
+            let display_path = file
                 .path
                 .strip_prefix(scan_root)
-                .unwrap_or(&usage.path)
+                .unwrap_or(&file.path)
                 .display()
                 .to_string();
             locations.push((display_path, line));
@@ -254,7 +281,7 @@ fn build_dep_report(
 
     let is_wildcard = import_roots
         .iter()
-        .any(|root| wildcard_roots.contains(root));
+        .any(|root| usage.wildcard_roots.contains(root));
     let files = files_with_usage.len() as u32;
     let symbol_count = symbols.len() as u32;
 
@@ -266,6 +293,31 @@ fn build_dep_report(
 
     let installed = name_map.contains(&dep.name);
     let entry_points = name_map.entry_points_for(&dep.name);
+    // Where a string literal names this dependency, if one does. Reported with the exact file and line so the reader can judge the claim rather than take it -- see CLAUDE.md non-negotiable #9.
+    let named_at = usage.files.iter().find_map(|file| {
+        import_roots.iter().find_map(|root| {
+            file.string_refs.get(root).map(|line| {
+                let display_path = file
+                    .path
+                    .strip_prefix(scan_root)
+                    .unwrap_or(&file.path)
+                    .display();
+                format!("named as a string in {display_path}:{line}")
+            })
+        })
+    });
+    // An unimported package that another *used* distribution declares as an optional extra is a backend selected at runtime, not dead weight: SQLAlchemy declares psycopg2-binary and PyMySQL this way and imports them from inside its own dialects. Requiring the provider to be in use is what keeps this from excusing every optional extra in site-packages.
+    let provider = name_map
+        .extra_providers_for(&dep.name)
+        .and_then(|providers| {
+            providers.iter().find(|provider| {
+                name_map.imports_for(provider).is_some_and(|roots| {
+                    roots
+                        .iter()
+                        .any(|root| usage.used_roots.contains(root.as_str()))
+                })
+            })
+        });
     let (verdict, usage) = classify(
         imports,
         files,
@@ -274,13 +326,20 @@ fn build_dep_report(
         Signals {
             is_wildcard,
             registers_entry_points: entry_points.is_some(),
+            named_by_string: named_at.is_some(),
+            provided_as_extra: provider.is_some(),
             installable_here,
             installed,
         },
         thresholds,
     );
     let registration = (verdict == Verdict::Registered)
-        .then(|| entry_points.map(EntryPoints::evidence))
+        .then(|| {
+            entry_points
+                .map(EntryPoints::evidence)
+                .or_else(|| provider.map(|p| format!("optional dependency of {p}")))
+                .or(named_at)
+        })
         .flatten();
     // The marker is the most specific explanation when it applies -- it says why the package isn't there, not merely that it isn't. Otherwise distinguish a package that is absent from one that is present but tells us nothing about its import names.
     let unknown_reason = (verdict == Verdict::Unknown).then(|| {
@@ -325,6 +384,7 @@ fn classify(
 
     // Registration only ever overrides Drop. A registered package that IS imported is still a fair inline/keep candidate -- suppressing that would cost the signal this tool exists for.
     if imports == 0 {
+        // The package's own declaration of how it gets loaded is the strongest evidence there is, and it explains the absent imports even when nothing else about the package resolves -- a binary-only distribution like `dumb-init` owns no import names at all.
         if signals.registers_entry_points {
             return (Verdict::Registered, UsageBand::None);
         }
@@ -335,6 +395,10 @@ fn classify(
         // Nothing resolved for this name: not installed, or installed with metadata we can't read (legacy `.egg-info`). Either way its import roots are unknown, so zero measured imports means nothing.
         if !signals.installed {
             return (Verdict::Unknown, UsageBand::None);
+        }
+        // Evidence from somewhere other than the package itself, which is why it ranks below "we couldn't read this one": saying "optional dependency of google-cloud-storage" implies we looked for imports and found none, when in truth we never learned its import names.
+        if signals.provided_as_extra || signals.named_by_string {
+            return (Verdict::Registered, UsageBand::None);
         }
         return (Verdict::Drop, UsageBand::None);
     }
@@ -424,6 +488,82 @@ mod tests {
         assert_eq!(
             classify(1, 100, 287, 100, Signals::default(), &t),
             (Verdict::Keep, UsageBand::Heavy)
+        );
+    }
+
+    #[test]
+    fn being_named_in_a_string_overrides_drop_only() {
+        let t = default_thresholds();
+
+        // authentik's real shape: django-prometheus appears only in INSTALLED_APPS and MIDDLEWARE, as strings.
+        assert_eq!(
+            classify(
+                0,
+                0,
+                0,
+                0,
+                Signals {
+                    named_by_string: true,
+                    ..Default::default()
+                },
+                &t
+            ),
+            (Verdict::Registered, UsageBand::None)
+        );
+
+        // A package the project imports is still judged on its usage, string or no string.
+        assert_eq!(
+            classify(
+                1,
+                1,
+                1,
+                1,
+                Signals {
+                    named_by_string: true,
+                    ..Default::default()
+                },
+                &t
+            )
+            .0,
+            Verdict::Inline
+        );
+    }
+
+    #[test]
+    fn optional_backend_of_a_used_dependency_overrides_drop_only() {
+        let t = default_thresholds();
+
+        // mlflow's real shape: psycopg2-binary is never imported and registers no entry points, and is reached only through SQLAlchemy's built-in postgresql dialect.
+        assert_eq!(
+            classify(
+                0,
+                0,
+                0,
+                0,
+                Signals {
+                    provided_as_extra: true,
+                    ..Default::default()
+                },
+                &t
+            ),
+            (Verdict::Registered, UsageBand::None)
+        );
+
+        // Being another package's optional backend never rescues one the project does import.
+        assert_eq!(
+            classify(
+                1,
+                1,
+                1,
+                1,
+                Signals {
+                    provided_as_extra: true,
+                    ..Default::default()
+                },
+                &t
+            )
+            .0,
+            Verdict::Inline
         );
     }
 
