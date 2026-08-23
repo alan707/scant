@@ -1,0 +1,199 @@
+name: Field test
+
+# Runs the published (or freshly built) scant against real, large Python projects and
+# summarizes every verdict in one table. Manual-only: each job clones a multi-thousand-file
+# repo and installs its full dependency set, which is far too heavy for per-PR CI. The
+# eleven repos in .github/field-test-repos.json were picked for dependency count, file
+# count, and low "lock noise" -- the share of declared packages that are transitive
+# artifacts of a flattened lockfile, which makes every unused verdict against them suspect.
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: 'Which repos to test: "all", or a comma-separated list of ids/slugs from .github/field-test-repos.json'
+        default: all
+      scant_source:
+        description: Test the published wheel, or the current checkout
+        type: choice
+        options: [pypi, source]
+        default: pypi
+      scant_version:
+        description: PyPI version to test (blank = latest, pre-releases included)
+        default: ''
+
+concurrency:
+  group: field-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Select repos
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: select
+        env:
+          REPOS: ${{ inputs.repos }}
+        run: |
+          matrix=$(python3 - <<'PY'
+          import json, os
+
+          wanted = os.environ["REPOS"].strip().lower()
+          repos = json.load(open(".github/field-test-repos.json"))
+          if wanted and wanted != "all":
+              keys = {k.strip() for k in wanted.split(",") if k.strip()}
+              repos = [r for r in repos if r["id"].lower() in keys or r["repo"].lower() in keys]
+              if not repos:
+                  raise SystemExit(f"::error::no repos matched {wanted!r}")
+          print(json.dumps(repos))
+          PY
+          )
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix" | python3 -c "import json,sys; print('\n'.join(r['repo'] for r in json.load(sys.stdin)))"
+
+  build-scant:
+    name: Build scant from source
+    if: inputs.scant_source == 'source'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --quiet
+      - uses: actions/upload-artifact@v7
+        with:
+          name: scant-binary
+          path: target/release/scant
+
+  field-test:
+    name: ${{ matrix.repo }}
+    needs: [plan, build-scant]
+    if: always() && needs.plan.result == 'success' && needs.build-scant.result != 'failure' && needs.build-scant.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      # One repo failing to install its dependencies says nothing about the other ten
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # A default runner has ~14 GB free; a repo declaring torch or a full ML stack needs more
+      - name: Free disk space
+        if: matrix.free_disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Install system build dependencies
+        env:
+          EXTRA_APT: ${{ matrix.apt }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libpq-dev libxml2-dev libxslt1-dev libffi-dev libssl-dev zlib1g-dev libjpeg-dev \
+            $EXTRA_APT
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Install scant from PyPI
+        if: inputs.scant_source == 'pypi'
+        env:
+          VERSION: ${{ inputs.scant_version }}
+        run: |
+          # An isolated tool environment, never the target's venv -- installing scant into the
+          # environment under test would add metadata scant then has to reason about
+          uv tool install --prerelease allow "scant${VERSION:+==$VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install scant from this checkout
+        if: inputs.scant_source == 'source'
+        uses: actions/download-artifact@v8
+        with:
+          name: scant-binary
+          path: ${{ runner.temp }}/bin
+
+      - name: Put scant on PATH
+        if: inputs.scant_source == 'source'
+        run: |
+          chmod +x "$RUNNER_TEMP/bin/scant"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Record scant version
+        run: |
+          scant --version
+          echo "FT_SCANT_VERSION=$(scant --version)" >> "$GITHUB_ENV"
+
+      - name: Clone ${{ matrix.repo }}
+        env:
+          REPO: ${{ matrix.repo }}
+        run: git clone --depth 1 "https://github.com/$REPO" "$RUNNER_TEMP/target"
+
+      - name: Install the target's declared dependencies
+        env:
+          PYTHON_PIN: ${{ matrix.python }}
+        run: .github/scripts/field-test/install-deps.sh "$RUNNER_TEMP/target" "$PYTHON_PIN"
+
+      - name: Run scant
+        env:
+          NO_COLOR: '1'
+        run: |
+          set +e
+          scant "$RUNNER_TEMP/target" --env "$RUNNER_TEMP/target/.venv" > "$RUNNER_TEMP/report.txt" 2>&1
+          echo "FT_EXIT=$?" >> "$GITHUB_ENV"
+          set -e
+          cat "$RUNNER_TEMP/report.txt"
+
+      - name: Summarize this repo
+        if: always()
+        env:
+          FT_ID: ${{ matrix.id }}
+          FT_REPO: ${{ matrix.repo }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          python3 .github/scripts/field-test/parse_report.py \
+            < "$RUNNER_TEMP/report.txt" > "$RUNNER_TEMP/results/$FT_ID.json"
+          cp "$RUNNER_TEMP/report.txt" "$RUNNER_TEMP/results/$FT_ID.txt"
+          cat "$RUNNER_TEMP/results/$FT_ID.json"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: field-test-${{ matrix.id }}
+          path: ${{ runner.temp }}/results/
+
+  summary:
+    name: Summary
+    needs: [plan, field-test]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: field-test-*
+          merge-multiple: true
+          path: results
+      - name: Build the combined summary
+        env:
+          SELECTED: ${{ needs.plan.outputs.matrix }}
+        run: |
+          printf '%s' "$SELECTED" > selected.json
+          set +e
+          python3 .github/scripts/field-test/aggregate.py results selected.json > summary.md
+          echo "AGG_EXIT=$?" >> "$GITHUB_ENV"
+          set -e
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          cat summary.md
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: field-test-summary
+          path: summary.md
+      - name: Fail if any repo errored
+        run: exit "$AGG_EXIT"

@@ -1,0 +1,91 @@
+[
+  {
+    "id": "posthog",
+    "repo": "PostHog/posthog",
+    "declared": 192,
+    "py_files": 19335,
+    "free_disk": true,
+    "why": "192 hand-curated direct deps against 19k files, 25 of them heavy (clickhouse-driver, confluent-kafka, boto3, celery, azure-storage-blob) -- the biggest genuine surface in the pool"
+  },
+  {
+    "id": "sentry",
+    "repo": "getsentry/sentry",
+    "declared": 112,
+    "py_files": 7983,
+    "free_disk": true,
+    "why": "same shape as posthog, plus the credibility of a finding landing on an elite engineering org"
+  },
+  {
+    "id": "open-webui",
+    "repo": "open-webui/open-webui",
+    "declared": 98,
+    "py_files": 256,
+    "free_disk": true,
+    "why": "98 deps across 256 Python files -- 38 deps per 100 files, the most dependency-dense real project found"
+  },
+  {
+    "id": "odoo",
+    "repo": "odoo/odoo",
+    "declared": 104,
+    "py_files": 8608,
+    "python": "3.12",
+    "apt": "libldap2-dev libsasl2-dev",
+    "why": "requirements.txt with per-entry python_version markers on nearly every line -- the marker-evaluation specimen"
+  },
+  {
+    "id": "jumpserver",
+    "repo": "jumpserver/jumpserver",
+    "declared": 148,
+    "py_files": 1405,
+    "apt": "libldap2-dev libsasl2-dev",
+    "why": "148 deps against a modest 1.4k files"
+  },
+  {
+    "id": "saleor",
+    "repo": "saleor/saleor",
+    "declared": 69,
+    "py_files": 4338,
+    "why": "large well-maintained Django codebase, low lock noise"
+  },
+  {
+    "id": "metagpt",
+    "repo": "FoundationAgents/MetaGPT",
+    "declared": 71,
+    "py_files": 890,
+    "python": "3.11",
+    "free_disk": true,
+    "why": "requirements.txt manifest, 12 heavy AI/ML deps; pinned to python <3.12"
+  },
+  {
+    "id": "authentik",
+    "repo": "goauthentik/authentik",
+    "declared": 68,
+    "py_files": 2234,
+    "apt": "libldap2-dev libsasl2-dev libxmlsec1-dev",
+    "why": "heavy entry-point and plugin usage -- exercises the registered verdict"
+  },
+  {
+    "id": "paperless-ngx",
+    "repo": "paperless-ngx/paperless-ngx",
+    "declared": 62,
+    "py_files": 340,
+    "free_disk": true,
+    "why": "declares torch and friends against 340 files -- headline-generator candidate"
+  },
+  {
+    "id": "mlflow",
+    "repo": "mlflow/mlflow",
+    "declared": 38,
+    "py_files": 2654,
+    "free_disk": true,
+    "why": "smallest declared set of the eleven against a big tree -- the low-false-positive control"
+  },
+  {
+    "id": "invokeai",
+    "repo": "invoke-ai/InvokeAI",
+    "declared": 46,
+    "py_files": 1327,
+    "free_disk": true,
+    "why": "0% lock noise and declares torch + onnxruntime; a used-on-3-lines verdict here is the same shape as Superset/prophet"
+  }
+]
