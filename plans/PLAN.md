@@ -348,7 +348,7 @@ Every error: *what happened / why / what to do next*, in everyday words, via `mi
 - `stdlib`: `distutils` is stdlib on 3.9–3.11 but third-party on 3.12+; `telnetlib` stdlib through 3.12, gone in 3.13.
 
 ### 11b. Fixture projects (`tests/fixtures/`) — one trait each
-`unused/` · `light/` · `namespace/` · `name-mismatch/` · `stub/` · `entry-point/` · `pip-compiled/` · `excluded-usage/` (must trigger caveat) · `py39-distutils/` (version-sensitive stdlib)
+`unused/` · `light/` · `namespace/` · `name-mismatch/` · `stub/` · `entry-point/` · `pip-compiled/` · `flattened-manifest/` · `excluded-usage/` (must trigger caveat) · `py39-distutils/` (version-sensitive stdlib)
 
 ### 11c. Golden real-world tests (the FP taxonomy, with real specimens)
 Each of these was **observed in the wild** by the prototype and must be handled:
@@ -363,6 +363,7 @@ Each of these was **observed in the wild** by the prototype and must be handled:
 | Transitive pin | `numba`, `resampy` | beets | explain, don't accuse |
 | Test-only usage | `discogs-client`, `reflink` | beets | scan tests by default |
 | pip-compile lockfile | `base.txt` (301 → ~61 direct) | edx-platform | detect, use `.in` |
+| Flattened manifest (no marker) | 128 of 160 declared read as unused: `certifi`, `cffi`, `annotated-types`, `aiohappyeyeballs` | gpt-researcher | detect closure-shaped dep lists; downgrade confidence, don't accuse |
 
 ### 11d. Snapshot + CLI + bench
 - `insta` snapshots on rendered text (locks the ASCII).
@@ -412,7 +413,7 @@ Deliberately tiny: a *correct, beautiful report on one repo*, not generality.
 - Runs in <1s; output matches an `insta` snapshot.
 
 ### Phase 2 — Superset: robustness, config, the FP taxonomy
-Both manifest families; PEP 735; **entry-point detection**; **pip-compile detection**; full excludes + caveat pass; `[tool.scant]` config; configurable thresholds; `--target-version` + version-keyed stdlib; override table + heuristic fallback; data-only/stub allowlist; `--format json`; friendly error catalog; `explain` subcommand.
+Both manifest families; PEP 735; **entry-point detection**; **pip-compile detection**; **flattened-manifest detection**; revisit `[project.optional-dependencies]` unioning; full excludes + caveat pass; `[tool.scant]` config; configurable thresholds; `--target-version` + version-keyed stdlib; override table + heuristic fallback; data-only/stub allowlist; `--format json`; friendly error catalog; `explain` subcommand.
 **Acceptance:**
 - All §11c specimens handled correctly.
 - **Superset's 83 "unused" collapses to a small verified list**, with ~41 correctly reclassified as *registered, not imported*.

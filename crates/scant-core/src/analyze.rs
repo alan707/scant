@@ -12,7 +12,7 @@ use rayon::prelude::*;
 
 use crate::discover;
 use crate::manifest::{self, Dependency, ManifestError};
-use crate::namemap::{self, NameMap, NameMapError};
+use crate::namemap::{self, EntryPoints, NameMap, NameMapError};
 use crate::parse::{self, FileUsage};
 
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +36,7 @@ impl Default for Thresholds {
 pub enum Verdict {
     Drop,
     Inline,
+    Registered,
     Keep,
 }
 
@@ -65,6 +66,8 @@ pub struct DepReport {
     /// a single `path:line` for a one-file dependency, or `path +N files`
     /// when usage is spread across more than one.
     pub locations: Vec<(String, u32)>,
+    // How this dependency is loaded when nothing imports it -- the entry-point group, or the console script it installs. `Some` only for Registered.
+    pub registration: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +83,9 @@ impl Report {
     /// `0` if every dependency's verdict is Keep, `1` if anything is
     /// flagged Drop/Inline -- matches PLAN.md's exit code contract.
     pub fn has_findings(&self) -> bool {
-        self.deps.iter().any(|d| d.verdict != Verdict::Keep)
+        self.deps
+            .iter()
+            .any(|d| matches!(d.verdict, Verdict::Drop | Verdict::Inline))
     }
 }
 
@@ -223,14 +228,19 @@ fn build_dep_report(
     let files = files_with_usage.len() as u32;
     let symbol_count = symbols.len() as u32;
 
+    let entry_points = name_map.entry_points_for(&dep.name);
     let (verdict, usage) = classify(
         imports,
         files,
         lines_total,
         symbol_count,
         is_wildcard,
+        entry_points.is_some(),
         thresholds,
     );
+    let registration = (verdict == Verdict::Registered)
+        .then(|| entry_points.map(EntryPoints::evidence))
+        .flatten();
 
     DepReport {
         display_name: dep.display_name.clone(),
@@ -242,6 +252,7 @@ fn build_dep_report(
         verdict,
         usage,
         locations,
+        registration,
     }
 }
 
@@ -251,6 +262,7 @@ fn classify(
     lines: u32,
     symbols: u32,
     is_wildcard: bool,
+    registers_entry_points: bool,
     thresholds: &Thresholds,
 ) -> (Verdict, UsageBand) {
     // `from x import *` creates no bindings, so we fundamentally can't
@@ -260,7 +272,11 @@ fn classify(
         return (Verdict::Keep, usage_band_for_keep(lines, thresholds));
     }
 
+    // Registration only ever overrides Drop. A registered package that IS imported is still a fair inline/keep candidate -- suppressing that would cost the signal this tool exists for.
     if imports == 0 {
+        if registers_entry_points {
+            return (Verdict::Registered, UsageBand::None);
+        }
         return (Verdict::Drop, UsageBand::None);
     }
 
@@ -315,41 +331,87 @@ mod tests {
 
         // imports == 0 -> Drop, regardless of anything else.
         assert_eq!(
-            classify(0, 0, 0, 0, false, &t),
+            classify(0, 0, 0, 0, false, false, &t),
             (Verdict::Drop, UsageBand::None)
         );
 
         // Below all thresholds -> Inline/Trivial.
         assert_eq!(
-            classify(1, 1, 1, 1, false, &t),
+            classify(1, 1, 1, 1, false, false, &t),
             (Verdict::Inline, UsageBand::Trivial)
         );
 
         // Exactly at the threshold boundary still counts as "below" (<=).
         assert_eq!(
-            classify(1, t.files, t.lines, t.symbols, false, &t),
+            classify(1, t.files, t.lines, t.symbols, false, false, &t),
             (Verdict::Inline, UsageBand::Trivial)
         );
 
         // One line over any threshold -> Keep.
         assert_eq!(
-            classify(1, t.files, t.lines + 1, t.symbols, false, &t).0,
+            classify(1, t.files, t.lines + 1, t.symbols, false, false, &t).0,
             Verdict::Keep
         );
 
         // Usage band boundaries (threshold_lines = 3): <=9 Light, <=30 Moderate, else Heavy.
         assert_eq!(
-            classify(1, 100, 9, 100, false, &t),
+            classify(1, 100, 9, 100, false, false, &t),
             (Verdict::Keep, UsageBand::Light)
         );
         assert_eq!(
-            classify(1, 100, 30, 100, false, &t),
+            classify(1, 100, 30, 100, false, false, &t),
             (Verdict::Keep, UsageBand::Moderate)
         );
         assert_eq!(
-            classify(1, 100, 287, 100, false, &t),
+            classify(1, 100, 287, 100, false, false, &t),
             (Verdict::Keep, UsageBand::Heavy)
         );
+    }
+
+    #[test]
+    fn entry_point_registration_overrides_drop_but_never_inline_or_keep() {
+        let t = default_thresholds();
+
+        // Zero imports + registration -> Registered instead of Drop. This is the Superset case: ~40 SQLAlchemy dialects that are loaded by connection string, never imported.
+        assert_eq!(
+            classify(0, 0, 0, 0, false, true, &t),
+            (Verdict::Registered, UsageBand::None)
+        );
+
+        // Registration must NOT rescue a package that IS imported from an inline verdict -- that would suppress the signal this tool exists for.
+        assert_eq!(classify(1, 1, 1, 1, false, true, &t).0, Verdict::Inline);
+        assert_eq!(classify(1, 100, 287, 100, false, true, &t).0, Verdict::Keep);
+    }
+
+    #[test]
+    fn registered_dependencies_are_not_findings() {
+        let root = temp_dir("registered-exit-code");
+        fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"proj\"\ndependencies = [\"sqlalchemy_redshift\"]\n",
+        )
+        .unwrap();
+
+        let site_packages = root.join(".venv-fake");
+        let dist_info = site_packages.join("sqlalchemy_redshift-0.8.14.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        fs::write(dist_info.join("top_level.txt"), "sqlalchemy_redshift").unwrap();
+        fs::write(
+            dist_info.join("entry_points.txt"),
+            "[sqlalchemy.dialects]\nredshift = sqlalchemy_redshift.dialect:RedshiftDialect\n",
+        )
+        .unwrap();
+        fs::write(root.join("main.py"), "print('no imports here')\n").unwrap();
+
+        let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
+        let dep = &report.deps[0];
+
+        assert_eq!(dep.verdict, Verdict::Registered);
+        assert_eq!(dep.registration.as_deref(), Some("sqlalchemy.dialects"));
+        // Exit code 1 means "we found something you should act on" -- a registered dependency is working as designed.
+        assert!(!report.has_findings());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -357,7 +419,7 @@ mod tests {
         let t = default_thresholds();
         // Without the override this would read as Inline (imports=1, but
         // files/lines/symbols all 0, which is <= every threshold).
-        let (verdict, _) = classify(1, 0, 0, 0, true, &t);
+        let (verdict, _) = classify(1, 0, 0, 0, true, false, &t);
         assert_eq!(verdict, Verdict::Keep);
     }
 

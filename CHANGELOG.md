@@ -4,6 +4,12 @@ All notable changes to `scant` are documented here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Added
+- Entry-point detection: a dependency that registers entry points in its `entry_points.txt` (a SQLAlchemy dialect, a `pytest11` plugin, a `console_scripts` command) is loaded by name at runtime rather than imported, so zero imports is expected rather than suspicious. These are now reported in their own `registered` group with the loading mechanism named in the `WHERE` column, instead of being flagged `drop`. Registration only ever overrides `drop` -- a registered package that *is* imported is still a fair `inline` candidate. Registered dependencies are not findings, so they no longer force exit code 1. Verified against a real changedetection.io clone, where `pytest-flask`, `pytest-mock`, `pytest-xdist`, and `jsonschema` moved out of `drop`, and against a real Apache Superset clone with all 165 declared dependencies installed, where `drop` falls from 78 to 19 with 50 reclassified as `registered` -- 36 of them `sqlalchemy.dialects`, the case this feature exists for.
+
+### Changed
+- The `ACTION` column is now sized to the widest verdict actually present rather than a fixed width, so reports without registered dependencies render exactly as before.
+
 ## [0.0.1a4]
 
 ### Added

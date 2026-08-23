@@ -13,7 +13,7 @@ use owo_colors::OwoColorize;
 use crate::analyze::{DepReport, Report, UsageBand, Verdict};
 
 const MIN_NAME_WIDTH: usize = 7; // fits the "PACKAGE" column header itself
-const ACTION_WIDTH: usize = 8; // fits "inline" plus a 2-space gutter
+const MIN_ACTION_WIDTH: usize = 8; // fits the "ACTION" column header plus a 2-space gutter
 const WHERE_MAX_WIDTH: usize = 80;
 
 /// `use_color` embeds real ANSI codes when true -- it does not itself
@@ -35,6 +35,11 @@ pub fn render(report: &Report, project_name: &str, use_color: bool) -> String {
         .iter()
         .filter(|d| d.verdict == Verdict::Inline)
         .collect();
+    let registered: Vec<&DepReport> = report
+        .deps
+        .iter()
+        .filter(|d| d.verdict == Verdict::Registered)
+        .collect();
     let keep: Vec<&DepReport> = report
         .deps
         .iter()
@@ -48,9 +53,14 @@ pub fn render(report: &Report, project_name: &str, use_color: bool) -> String {
         files = report.files_scanned,
         elapsed = report.elapsed.as_secs_f64(),
     );
+    // "registered" is omitted at zero -- it's a reassurance category, and naming it on every clean project is noise.
+    let registered_note = match registered.len() {
+        0 => String::new(),
+        n => format!(", registered {n}"),
+    };
     let _ = writeln!(
         out,
-        "Plan: drop {drop}, inline {inline}, keep {keep}.",
+        "Plan: drop {drop}, inline {inline}{registered_note}, keep {keep}.",
         drop = drop.len(),
         inline = inline.len(),
         keep = keep.len(),
@@ -65,6 +75,15 @@ pub fn render(report: &Report, project_name: &str, use_color: bool) -> String {
     }
     out.push('\n');
 
+    // Sized to the widest verdict actually present, the same way name_width is -- "registered" is long and most projects have none, so a fixed width would tax every report for a column they never show.
+    let action_width = report
+        .deps
+        .iter()
+        .map(|d| verdict_label(d.verdict).len() + 2)
+        .max()
+        .unwrap_or(MIN_ACTION_WIDTH)
+        .max(MIN_ACTION_WIDTH);
+
     let name_width = report
         .deps
         .iter()
@@ -75,17 +94,18 @@ pub fn render(report: &Report, project_name: &str, use_color: bool) -> String {
 
     let _ = writeln!(
         out,
-        "  {:<ACTION_WIDTH$}{:<name_width$}  {:>4}  {:>5}  {:<8}  WHERE",
+        "  {:<action_width$}{:<name_width$}  {:>4}  {:>5}  {:<8}  WHERE",
         "ACTION",
         "PACKAGE",
         "USES",
         "LINES",
         "USE",
+        action_width = action_width,
         name_width = name_width
     );
 
     let mut first_group = true;
-    for group in [&drop, &inline, &keep] {
+    for group in [&drop, &inline, &registered, &keep] {
         if group.is_empty() {
             continue;
         }
@@ -94,23 +114,31 @@ pub fn render(report: &Report, project_name: &str, use_color: bool) -> String {
         }
         first_group = false;
         for dep in group {
-            render_row(&mut out, dep, name_width, use_color);
+            render_row(&mut out, dep, action_width, name_width, use_color);
         }
     }
 
     out
 }
 
-fn render_row(out: &mut String, dep: &DepReport, name_width: usize, use_color: bool) {
+fn render_row(
+    out: &mut String,
+    dep: &DepReport,
+    action_width: usize,
+    name_width: usize,
+    use_color: bool,
+) {
     let label = verdict_label(dep.verdict);
     // Pad on the *plain* word first, then color it -- ANSI escape bytes
     // count toward a string's length, so `{:<N}` on an already-colored
     // string would under-pad. Padding as a separate literal sidesteps that.
-    let padding = " ".repeat(ACTION_WIDTH.saturating_sub(label.len()));
+    let padding = " ".repeat(action_width.saturating_sub(label.len()));
     let action_cell = if use_color {
         match dep.verdict {
             Verdict::Drop => format!("{}{padding}", label.red()),
             Verdict::Inline => format!("{}{padding}", label.yellow()),
+            // Registered is informational, never an action -- dim keeps it visibly subordinate to the three real verdicts.
+            Verdict::Registered => format!("{}{padding}", label.dimmed()),
             Verdict::Keep => format!("{}{padding}", label.green()),
         }
     } else {
@@ -145,12 +173,17 @@ fn render_row(out: &mut String, dep: &DepReport, name_width: usize, use_color: b
 /// additional files into a `+N files` suffix -- usage is spread widely
 /// enough that one exact line wouldn't tell the whole story anyway.
 fn where_column(dep: &DepReport) -> String {
+    // Registered has no usage to point at, so the WHERE column carries the mechanism that loads it instead.
+    if dep.verdict == Verdict::Registered {
+        let evidence = dep.registration.as_deref().unwrap_or("--");
+        return truncate_front(evidence, WHERE_MAX_WIDTH);
+    }
     if dep.locations.is_empty() {
         return "--".to_string();
     }
     let (first_path, first_line) = &dep.locations[0];
     let raw = match dep.verdict {
-        Verdict::Drop => return "--".to_string(),
+        Verdict::Drop | Verdict::Registered => return "--".to_string(),
         Verdict::Inline => format!("{first_path}:{first_line}"),
         Verdict::Keep => {
             if dep.locations.len() == 1 {
@@ -201,6 +234,7 @@ fn verdict_label(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Drop => "drop",
         Verdict::Inline => "inline",
+        Verdict::Registered => "registered",
         Verdict::Keep => "keep",
     }
 }
@@ -222,7 +256,58 @@ mod tests {
             verdict,
             usage,
             locations: vec![],
+            registration: None,
         }
+    }
+
+    fn registered_dep(name: &str, evidence: &str) -> DepReport {
+        DepReport {
+            imports: 0,
+            files: 0,
+            lines: 0,
+            symbols: 0,
+            registration: Some(evidence.to_string()),
+            ..dep(name, Verdict::Registered, UsageBand::None)
+        }
+    }
+
+    #[test]
+    fn registered_row_shows_the_loading_mechanism_and_widens_the_action_column() {
+        let report = Report {
+            manifest_source_label: "pyproject.toml",
+            files_scanned: 1,
+            elapsed: Duration::from_millis(0),
+            deps: vec![
+                dep("colorama", Verdict::Inline, UsageBand::Trivial),
+                registered_dep("sqlalchemy-redshift", "sqlalchemy.dialects"),
+            ],
+            warnings: vec![],
+        };
+
+        let rendered = render(&report, "superset", false);
+
+        // The mechanism goes in WHERE, so the verdict is never a bare assertion.
+        assert!(rendered.contains("registered  sqlalchemy-redshift"));
+        assert!(rendered.contains("sqlalchemy.dialects"));
+        // Present-but-nonzero registered count is named in the plan line.
+        assert!(rendered.contains("Plan: drop 0, inline 1, registered 1, keep 0."));
+        // Every row shares one grid, so the inline row widens to match.
+        assert!(rendered.contains("  inline      colorama"));
+    }
+
+    #[test]
+    fn registered_count_is_omitted_when_zero() {
+        let report = Report {
+            manifest_source_label: "pyproject.toml",
+            files_scanned: 1,
+            elapsed: Duration::from_millis(0),
+            deps: vec![dep("requests", Verdict::Keep, UsageBand::Heavy)],
+            warnings: vec![],
+        };
+
+        let rendered = render(&report, "proj", false);
+        assert!(rendered.contains("Plan: drop 0, inline 0, keep 1."));
+        assert!(!rendered.contains("registered"));
     }
 
     #[test]

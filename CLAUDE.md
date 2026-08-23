@@ -14,7 +14,11 @@ Signal 2 is the differentiator. Existing tools (deptry, fawltydeps, pip-check-re
 
 ## Current status
 
-Pre-alpha. No code yet. **We are on Phase 0** (scaffold). Do not skip ahead — each phase in `plans/PLAN.md` has acceptance criteria that must pass before the next begins.
+Alpha. **Phase 1 is done and shipped** — `0.0.1a4` is on PyPI, validated against a real mkdocs clone. **We are on Phase 2** (Superset: robustness, config, the FP taxonomy). Do not skip ahead — each phase in `plans/PLAN.md` has acceptance criteria that must pass before the next begins.
+
+Built and working: manifest detection across all four formats, RECORD-based name resolution, both signals, the drop/inline/keep report, colored TTY output, wheels for Linux/macOS/Windows. Note that the `setup.cfg`/`setup.py` adapters and the maturin→PyPI pipeline are nominally Phase 4 items that landed early.
+
+The largest unbuilt Phase 2 item is **entry-point detection** — worth ~41 of Superset's 83 false "unused". Also unbuilt: caveat logic (non-negotiable #8), PEP 735 `[dependency-groups]`, `--target-version`, the override table, the data-only/stub allowlist, `[tool.scant]` config, `--format json`, and `explain`.
 
 ## Working rules
 
