@@ -26,43 +26,44 @@ Written against `main` @ `55ecef3`. Two things landed after this design was firs
 ## Target UI
 
 ```
-┌─ Dependencies ─────────────────────────┐┌─ Where it's used ─────────────────────┐
-│ Action     Size    Uses Lines Package  ││ Line   Tree                           │
-│ drop       2.1 MB     0     0 babel    ││        superset/                      │
-│>inline     38 MB      1     1 prophet  ││        ├── utils/                     │
-│ inline     118 kB     1     1 polyline ││   :66  │   └── …/prophet.py           │
-│ registered 4.2 MB     0     0 gunicorn ││        └── (1 file)                   │
-│ unknown    —          0     0 pywin32  ││                                       │
-│ keep       6.4 MB    14    62 click    ││                                       │
-└────────────────────────────────────────┘│                                       │
-┌─ Dependency details ───────────────────┐│                                       │
-│ prophet 1.1.5 · 38 MB · 1 file, 1 line ││                                       │
-│ symbol: Prophet                        ││                                       │
-│ defined in prophet/forecaster.py:38    ││                                       │
-│   38 │ class Prophet(object):          ││                                       │
-│   39 │     """Prophet forecaster."""   ││                                       │
-└────────────────────────────────────────┘│                                       │
+┌─ Dependencies ─────────────────────────┐┌─ Used here · superset/…/prophet.py ───┐
+│ Action     Size    Uses Lines Package  ││   64 │     df = df.rename(columns=…)  │
+│ drop       2.1 MB     0     0 babel    ││   65 │                                │
+│>inline     38 MB      1     1 prophet  ││   66 │     model = Prophet(**args)  ← │
+│ inline     118 kB     1     1 polyline ││   67 │     if weekly_seasonality:     │
+│ registered 4.2 MB     0     0 gunicorn │└───────────────────────────────────────┘
+│ unknown    —          0     0 pywin32  │┌─ Defined in · prophet/forecaster.py ──┐
+│ keep       6.4 MB    14    62 click    ││   38 │ class Prophet(object):         │
+└────────────────────────────────────────┘│   39 │     """Prophet forecaster.     │
+┌─ Dependency details ───────────────────┐│   40 │                                │
+│ prophet 1.1.5 · 38 MB · 1 file, 1 line ││   41 │     def __init__(self, …):     │
+│ symbol: Prophet                        ││   42 │         self.growth = growth   │
+└────────────────────────────────────────┘│   43 │         …                      │
 ┌─ Project totals ───────────────────────┐│                                       │
 │ 165 declared · 1.4 GB installed        ││                                       │
 │ droppable   78 deps · 310 MB           ││                                       │
 │ inlineable  23 deps · 195 MB           ││                                       │
 └────────────────────────────────────────┘└───────────────────────────────────────┘
- tab switch pane · / filter · enter open in $EDITOR · ? help · q quit
+ tab switch pane · / filter · enter edit usage in $EDITOR · ? help · q quit
 ```
 
 *(Sizes illustrative — not measured.)*
 
-### Right pane and details panel, per verdict
+The right column is the heart of it: **the lines you'd delete, directly above the code you'd copy.** That pairing is what turns "inline this dependency" from a research task into a mechanical one.
 
-All five cases must be designed; three of them have no usage to show, and peeking should answer the question that verdict actually raises.
+### Right column, per verdict
 
-| Verdict | Right pane | Details panel |
+Both right panes are **always read-only**. All five verdicts need a design; three have no usage to show, and peeking should answer the question that verdict actually raises.
+
+| Verdict | Top-right | Bottom-right |
 |---|---|---|
-| `inline` | Usage tree | Symbol name + its definition source in the installed package — the code you'd copy. **The headline case.** |
-| `keep` | Usage tree | Usage breakdown across files |
-| `drop` | Installed file tree | `METADATA` (name, version, summary) — enough to judge "safe to delete" without leaving the screen |
-| `registered` | Installed file tree | *How it loads without being imported*: the entry-point group or console script from `registration`, plus the commands it installed. Answers "why is this here if nothing imports it?" |
-| `unknown` | — (nothing to show) | `unknown_reason` plus what scant checked. Answers "why couldn't you tell me?" |
+| `inline` | Usage site source, centered on the line | Definition source in site-packages — the code you'd copy. **The headline case.** |
+| `keep` | Usage tree across files (dive-style) | Source of the selected file from that tree |
+| `drop` | `METADATA` — name, version, summary | Installed file tree, so "safe to delete?" is answerable in place |
+| `registered` | *How it loads without being imported*: entry-point group or console script from `registration`, plus installed commands | Installed file tree |
+| `unknown` | `unknown_reason` plus what scant checked — answers "why couldn't you tell me?" | — (single full-height pane) |
+
+`inline` needs no usage tree: an `inline` verdict *means* usage under the thresholds (≤3 lines in ≤2 files by default), so there is essentially always exactly one usage site. The tree only earns its space for `keep`.
 
 ## The size dimension (new signal)
 
@@ -116,11 +117,28 @@ Reuse the `ruff_python_parser` + `Visitor` pattern already in `parse.rs`:
 
 ## Editing model — read-only panes + full-screen handoff
 
-Embedding a live editable vim in a pane is possible (`tui-term 0.3.4` over `portable-pty 0.9.0` + `vt100 0.16.2`, all actively maintained). **Recommend against it.** dive doesn't do it; neither does k9s, lazygit, or `gh dash` — they all suspend and hand the full terminal to `$EDITOR`.
+**Both right panes are read-only.** Editing happens by suspending the TUI and handing the whole terminal to `$EDITOR`, then returning. Three reasons this beats embedding an editable pane:
 
-Terminal-in-terminal is where this class of project reliably gets stuck: vim drives its own alternate screen (nested alt-screens), `Esc` disambiguation against escape sequences is unsolved in practice and vim leans on `Esc` constantly, plus `SIGWINCH` propagation, bracketed paste, mouse and true-color passthrough. It also forces a focus model that breaks the global keymap — `q` can't mean quit, `/` can't mean filter — and `TestBackend` can't meaningfully cover a live PTY.
+- **No terminal emulation.** Embedding a live editable vim is possible (`tui-term` over `portable-pty` + `vt100`), but terminal-in-terminal is where this class of project reliably gets stuck: vim drives its own alternate screen (so we'd nest alt-screens), `Esc` disambiguation against escape sequences is unsolved in practice and vim leans on `Esc` constantly, plus `SIGWINCH` propagation, bracketed paste, mouse and true-color passthrough. dive doesn't do it; neither does k9s, lazygit, or `gh dash`.
+- **The keymap stays global.** An editable pane forces a focus model where `q` can't mean quit and `/` can't mean filter.
+- **The definition pane *must* be read-only anyway.** It points into site-packages, so an editable pane there is one keystroke from editing an installed package — a change that "works" locally and silently evaporates on the next `pip install`. Read-only removes the footgun entirely; to reuse the code you copy it out, which is what inlining is.
 
-**Instead:** panes are read-only and scrollable — enough to *read* the call site and definition together, which is the point. `Enter` suspends the TUI and opens `$EDITOR` at that file and line, full width, returning to the same selection. Full editing power, no emulator surface. Revisit as opt-in once the layout is proven.
+It also keeps the whole UI snapshot-testable via `TestBackend`, which a live PTY would not be.
+
+### Save → re-scan dialog
+
+The one thing dive never has to solve: **its images are immutable, our files are not.** The moment you inline a dependency and delete the import, every number on screen is wrong.
+
+Returning from `$EDITOR` is the exact, unambiguous moment to handle that — no filesystem watching required. On return, show a modal:
+
+```
+┌─ superset/utils/pandas_postprocessing/prophet.py saved ─┐
+│  Numbers on screen may now be out of date.              │
+│    [c] continue    [r] re-scan                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+Only show it if the file's mtime actually changed — quitting the editor without saving shouldn't nag. `[r]` re-runs `analyze()` (~0.2s even on Superset, so no spinner needed) and rebuilds every pane and total in place. Re-scan must **preserve selection by package name, not by index**, since a dependency may have shifted verdict groups or vanished from the list entirely — which is precisely the outcome you were hoping for.
 
 ## New: `crates/scant-cli/src/tui/`
 
@@ -168,9 +186,13 @@ The two failure modes that make a TUI feel broken:
 
 ## Keybindings (dive-flavored)
 
-`Tab` switch focused pane (dive's core interaction) · `j`/`k`/`↑`/`↓` move · `g`/`G` top/bottom · `Ctrl-d`/`Ctrl-u` half-page · `Space` expand/collapse tree node · `Enter` open in `$EDITOR` · `/` filter, `Esc` clears · `?` help · `q`/`Ctrl-C` quit.
+`Tab` cycle focused pane — dependencies → usage → definition (dive's core interaction) · `j`/`k`/`↑`/`↓` move or scroll the focused pane · `g`/`G` top/bottom · `Ctrl-d`/`Ctrl-u` half-page · `Space` expand/collapse tree node · `Enter` edit the usage site in `$EDITOR` · `/` filter, `Esc` clears · `?` help · `q`/`Ctrl-C` quit.
 
 Group filters, one per verdict plus all: `0` all · `1` drop · `2` inline · `3` registered · `4` unknown · `5` keep. Numeric switching follows dive/k9s and sidesteps the collision with `k` = up.
+
+While the save dialog is up it captures all input: `c` continue · `r` re-scan. Nothing else is live until it's dismissed.
+
+`Enter` always targets the **usage site**, never the definition — the definition lives in site-packages and is deliberately not editable.
 
 ## Testing
 
@@ -179,9 +201,11 @@ Group filters, one per verdict plus all: `0` all · `1` drop · `2` inline · `3
 - `defsite.rs` — synthetic fixtures: direct class def, direct function def, relative one-hop re-export, **absolute self-referential re-export**, multi-hop, cycle guard terminates, single-module dist, symbol absent.
 - `namemap.rs` — size summing: normal `RECORD`, rows with an empty size field, editable install with no payload → `None` not `0`.
 - `tui/tree.rs` — path list → tree shape, shared prefixes, single file, deep nesting, collapse state.
-- `tui/app.rs` — selection clamping at both ends, filter narrows and `Esc` restores, group switch resets selection sanely, pane focus cycling, empty filter result doesn't panic.
-- `tui/render.rs` — insta snapshots of `TestBackend` buffers, **one per verdict variant (all five)**, locking layout the way `report.rs`'s snapshot does.
+- `tui/app.rs` — selection clamping at both ends, filter narrows and `Esc` restores, group switch resets selection sanely, pane focus cycling through all three, empty filter result doesn't panic.
+- `tui/app.rs` (re-scan) — selection is restored **by package name across a re-scan**, including the cases that matter: the selected dependency changed verdict group, and the selected dependency disappeared from the report entirely (the success case for inlining) — neither may panic or leave selection dangling.
+- `tui/render.rs` — insta snapshots of `TestBackend` buffers, **one per verdict variant (all five)**, plus one with the save dialog up, locking layout the way `report.rs`'s snapshot does.
 - `tui/editor.rs` — table test across every editor form above, unknown fallback, `SCANT_EDITOR_CMD`.
+- Dialog gating — mtime unchanged after the editor exits ⇒ no dialog; mtime changed ⇒ dialog. Pure function over a timestamp pair, no real editor needed.
 
 ## Risk summary
 
@@ -201,7 +225,7 @@ Most of this is routine: split panes, tables, trees, and file previews are what 
 
 ## Out of scope (follow-ups)
 
-Transitive installed weight (needs a dependency graph) · per-line usage sites beyond the first per file (needs `build_dep_report` to stop collapsing each file's lines to their minimum) · syntax highlighting (`syntect` is heavy; v1 dims context and emphasizes the target line, keeping color additive per CLAUDE.md) · embedded editable terminal · clipboard yank · live threshold tuning · mouse support.
+Transitive installed weight (needs a dependency graph) · per-line usage sites beyond the first per file (needs `build_dep_report` to stop collapsing each file's lines to their minimum) · syntax highlighting (`syntect` is heavy; v1 dims context and emphasizes the target line, keeping color additive per CLAUDE.md) · clipboard yank of the definition (the obvious next step for the inline workflow, deliberately deferred until the read-only layout proves itself) · live threshold tuning · mouse support.
 
 ## Critical files
 
