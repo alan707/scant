@@ -125,20 +125,28 @@ Reuse the `ruff_python_parser` + `Visitor` pattern already in `parse.rs`:
 
 It also keeps the whole UI snapshot-testable via `TestBackend`, which a live PTY would not be.
 
-### Save → re-scan dialog
+### Keeping the report fresh
 
 The one thing dive never has to solve: **its images are immutable, our files are not.** The moment you inline a dependency and delete the import, every number on screen is wrong.
 
-Returning from `$EDITOR` is the exact, unambiguous moment to handle that — no filesystem watching required. On return, show a modal:
+Two cases, handled differently — the distinction being whether the change was *expected*:
+
+**You edited via `Enter` → silent re-scan, no dialog.** Returning from `$EDITOR` is an exact, unambiguous moment: compare the file's mtime across the handoff, and if it changed, just refresh. A modal exists to guard an expensive or disruptive action, and re-analysis is ~0.2s even on Superset — asking permission would cost more attention than the work it's guarding. Quitting the editor without saving leaves mtime untouched and does nothing.
+
+**Something changed it elsewhere → dialog.** An unannounced refresh that reshuffles the screen while you're reading it is disorienting, so this case announces itself:
 
 ```
-┌─ superset/utils/pandas_postprocessing/prophet.py saved ─┐
-│  Numbers on screen may now be out of date.              │
-│    [c] continue    [r] re-scan                          │
+┌─ superset/utils/pandas_postprocessing/prophet.py ───────┐
+│  Changed on disk since scant last read it.              │
+│    [r] re-scan    [c] keep showing                      │
 └─────────────────────────────────────────────────────────┘
 ```
 
-Only show it if the file's mtime actually changed — quitting the editor without saving shouldn't nag. `[r]` re-runs `analyze()` (~0.2s even on Superset, so no spinner needed) and rebuilds every pane and total in place. Re-scan must **preserve selection by package name, not by index**, since a dependency may have shifted verdict groups or vanished from the list entirely — which is precisely the outcome you were hoping for.
+Detection is deliberately narrow: poll the mtime of **only the files currently displayed** (the usage file and the definition file — two `stat` calls) on the event loop's idle tick. `crossterm`'s `event::poll(timeout)` already provides that tick, so this needs no watcher crate, no background thread, and no debouncing of editor temp-file/atomic-rename churn.
+
+The honest limitation: this catches edits to what you're looking at, not edits elsewhere in the tree that would shift totals. Full coverage means a real filesystem watcher (`notify`), which is a much bigger hammer — deferred until narrow polling proves insufficient.
+
+**Both paths share one requirement:** re-scan must **preserve selection by package name, not by index**. A dependency may shift verdict groups or vanish from the report entirely — the latter being precisely the outcome you were hoping for — and an index-based restore would silently land on an arbitrary neighbor.
 
 ## New: `crates/scant-cli/src/tui/`
 
@@ -190,7 +198,7 @@ The two failure modes that make a TUI feel broken:
 
 Group filters, one per verdict plus all: `0` all · `1` drop · `2` inline · `3` registered · `4` unknown · `5` keep. Numeric switching follows dive/k9s and sidesteps the collision with `k` = up.
 
-While the save dialog is up it captures all input: `c` continue · `r` re-scan. Nothing else is live until it's dismissed.
+While the changed-on-disk dialog is up it captures all input: `r` re-scan · `c` keep showing. Nothing else is live until it's dismissed. (Edits made through `Enter` never raise it — they re-scan silently.)
 
 `Enter` always targets the **usage site**, never the definition — the definition lives in site-packages and is deliberately not editable.
 
@@ -203,9 +211,9 @@ While the save dialog is up it captures all input: `c` continue · `r` re-scan. 
 - `tui/tree.rs` — path list → tree shape, shared prefixes, single file, deep nesting, collapse state.
 - `tui/app.rs` — selection clamping at both ends, filter narrows and `Esc` restores, group switch resets selection sanely, pane focus cycling through all three, empty filter result doesn't panic.
 - `tui/app.rs` (re-scan) — selection is restored **by package name across a re-scan**, including the cases that matter: the selected dependency changed verdict group, and the selected dependency disappeared from the report entirely (the success case for inlining) — neither may panic or leave selection dangling.
-- `tui/render.rs` — insta snapshots of `TestBackend` buffers, **one per verdict variant (all five)**, plus one with the save dialog up, locking layout the way `report.rs`'s snapshot does.
+- `tui/render.rs` — insta snapshots of `TestBackend` buffers, **one per verdict variant (all five)**, plus one with the changed-on-disk dialog up, locking layout the way `report.rs`'s snapshot does.
 - `tui/editor.rs` — table test across every editor form above, unknown fallback, `SCANT_EDITOR_CMD`.
-- Dialog gating — mtime unchanged after the editor exits ⇒ no dialog; mtime changed ⇒ dialog. Pure function over a timestamp pair, no real editor needed.
+- Freshness gating — a pure function over a timestamp pair plus the change's origin: editor-return + mtime unchanged ⇒ nothing; editor-return + mtime changed ⇒ silent re-scan; idle-tick + mtime changed ⇒ dialog. No real editor or filesystem events needed.
 
 ## Risk summary
 
