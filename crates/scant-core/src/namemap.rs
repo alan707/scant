@@ -15,6 +15,37 @@ use pep508_rs::PackageName;
 #[derive(Debug, Default)]
 pub struct NameMap {
     dist_imports: HashMap<PackageName, BTreeSet<String>>,
+    dist_entry_points: HashMap<PackageName, EntryPoints>,
+}
+
+// Entry points a distribution registers in `entry_points.txt`. Anything registering one is loaded by name at runtime -- a framework resolving a plugin, or a shell running a command -- so zero imports is expected, not unused. See CLAUDE.md non-negotiable #4.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EntryPoints {
+    pub plugin_groups: BTreeSet<String>,
+    pub console_scripts: BTreeSet<String>,
+}
+
+impl EntryPoints {
+    pub fn is_empty(&self) -> bool {
+        self.plugin_groups.is_empty() && self.console_scripts.is_empty()
+    }
+
+    // Short evidence for the report's WHERE column -- names the mechanism that loads it, never a bare assertion. See CLAUDE.md non-negotiable #9.
+    pub fn evidence(&self) -> String {
+        if let Some(first) = self.plugin_groups.iter().next() {
+            return match self.plugin_groups.len() - 1 {
+                0 => first.clone(),
+                extra => format!("{first} +{extra} more"),
+            };
+        }
+        match self.console_scripts.iter().next() {
+            Some(first) => match self.console_scripts.len() - 1 {
+                0 => format!("console_scripts: {first}"),
+                extra => format!("console_scripts: {first} +{extra} more"),
+            },
+            None => String::new(),
+        }
+    }
 }
 
 impl NameMap {
@@ -27,6 +58,11 @@ impl NameMap {
 
     pub fn contains(&self, dist: &PackageName) -> bool {
         self.dist_imports.contains_key(dist)
+    }
+
+    // Entry points this distribution registers, if it registers any.
+    pub fn entry_points_for(&self, dist: &PackageName) -> Option<&EntryPoints> {
+        self.dist_entry_points.get(dist)
     }
 
     pub fn len(&self) -> usize {
@@ -202,9 +238,13 @@ pub fn resolve_site_packages(python_path: &Path) -> Result<PathBuf, NameMapError
 /// `site_packages` and builds the distribution -> import-roots map.
 pub fn build(site_packages: &Path) -> NameMap {
     let mut dist_imports: HashMap<PackageName, BTreeSet<String>> = HashMap::new();
+    let mut dist_entry_points: HashMap<PackageName, EntryPoints> = HashMap::new();
 
     let Ok(entries) = std::fs::read_dir(site_packages) else {
-        return NameMap { dist_imports };
+        return NameMap {
+            dist_imports,
+            dist_entry_points,
+        };
     };
 
     for entry in entries.filter_map(Result::ok) {
@@ -225,13 +265,59 @@ pub fn build(site_packages: &Path) -> NameMap {
         let import_roots = import_roots_for_dist(&entry.path(), site_packages);
         if !import_roots.is_empty() {
             dist_imports
-                .entry(package_name)
+                .entry(package_name.clone())
                 .or_default()
                 .extend(import_roots);
         }
+
+        let entry_points = read_entry_points(&entry.path());
+        if !entry_points.is_empty() {
+            dist_entry_points.insert(package_name, entry_points);
+        }
     }
 
-    NameMap { dist_imports }
+    NameMap {
+        dist_imports,
+        dist_entry_points,
+    }
+}
+
+// `entry_points.txt` is INI-shaped, but hand-rolled here for the same reason RECORD is: the format is trivial, and configparser would case-fold the group and script names we want to show verbatim.
+fn read_entry_points(dist_info_dir: &Path) -> EntryPoints {
+    let mut found = EntryPoints::default();
+    let Ok(contents) = std::fs::read_to_string(dist_info_dir.join("entry_points.txt")) else {
+        return found;
+    };
+
+    let mut group: Option<String> = None;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            group = Some(name.trim().to_string());
+            continue;
+        }
+        let Some(current) = group.as_deref() else {
+            continue;
+        };
+        // A group with no entries registers nothing, so only a real `name = target` line counts.
+        let Some((name, _target)) = line.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if current == "console_scripts" || current == "gui_scripts" {
+            found.console_scripts.insert(name.to_string());
+        } else {
+            found.plugin_groups.insert(current.to_string());
+        }
+    }
+
+    found
 }
 
 fn import_roots_for_dist(dist_info_dir: &Path, site_packages: &Path) -> BTreeSet<String> {
@@ -544,6 +630,69 @@ mod tests {
         let dir = site_packages.join(dist_info);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("top_level.txt"), roots.join("\n")).unwrap();
+    }
+
+    #[test]
+    fn entry_points_txt_separates_plugin_groups_from_console_scripts() {
+        let dir = temp_dir("entry-points");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("entry_points.txt"),
+            "[console_scripts]\ngunicorn = gunicorn.app.wsgiapp:run\n\n[sqlalchemy.dialects]\nredshift = sqlalchemy_redshift.dialect:RedshiftDialect\n",
+        )
+        .unwrap();
+
+        let found = read_entry_points(&dir);
+        assert_eq!(
+            found.plugin_groups,
+            BTreeSet::from(["sqlalchemy.dialects".to_string()])
+        );
+        assert_eq!(
+            found.console_scripts,
+            BTreeSet::from(["gunicorn".to_string()])
+        );
+        assert_eq!(found.evidence(), "sqlalchemy.dialects");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn entry_points_group_header_with_no_entries_registers_nothing() {
+        let dir = temp_dir("entry-points-empty-group");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("entry_points.txt"), "[console_scripts]\n\n").unwrap();
+
+        assert!(read_entry_points(&dir).is_empty());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_entry_points_txt_is_not_an_error() {
+        let dir = temp_dir("entry-points-absent");
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(read_entry_points(&dir).is_empty());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn console_scripts_only_evidence_names_the_command() {
+        let dir = temp_dir("entry-points-console-only");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("entry_points.txt"),
+            "[console_scripts]\npytest = pytest:console_main\npy.test = pytest:console_main\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_entry_points(&dir).evidence(),
+            "console_scripts: py.test +1 more"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
