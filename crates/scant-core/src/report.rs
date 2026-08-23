@@ -40,10 +40,10 @@ pub fn render(report: &Report, project_name: &str, use_color: bool) -> String {
         .iter()
         .filter(|d| d.verdict == Verdict::Registered)
         .collect();
-    let inconclusive: Vec<&DepReport> = report
+    let unknown: Vec<&DepReport> = report
         .deps
         .iter()
-        .filter(|d| d.verdict == Verdict::Inconclusive)
+        .filter(|d| d.verdict == Verdict::Unknown)
         .collect();
     let keep: Vec<&DepReport> = report
         .deps
@@ -63,13 +63,13 @@ pub fn render(report: &Report, project_name: &str, use_color: bool) -> String {
         0 => String::new(),
         n => format!(", registered {n}"),
     };
-    let inconclusive_note = match inconclusive.len() {
+    let unknown_note = match unknown.len() {
         0 => String::new(),
-        n => format!(", inconclusive {n}"),
+        n => format!(", unknown {n}"),
     };
     let _ = writeln!(
         out,
-        "Plan: drop {drop}, inline {inline}{registered_note}{inconclusive_note}, keep {keep}.",
+        "Plan: drop {drop}, inline {inline}{registered_note}{unknown_note}, keep {keep}.",
         drop = drop.len(),
         inline = inline.len(),
         keep = keep.len(),
@@ -114,7 +114,7 @@ pub fn render(report: &Report, project_name: &str, use_color: bool) -> String {
     );
 
     let mut first_group = true;
-    for group in [&drop, &inline, &registered, &inconclusive, &keep] {
+    for group in [&drop, &inline, &registered, &unknown, &keep] {
         if group.is_empty() {
             continue;
         }
@@ -148,8 +148,8 @@ fn render_row(
             Verdict::Inline => format!("{}{padding}", label.yellow()),
             // Registered is informational, never an action -- dim keeps it visibly subordinate to the three real verdicts.
             Verdict::Registered => format!("{}{padding}", label.dimmed()),
-            // Inconclusive is an absence of a verdict, not a soft one -- dim keeps it from reading as an action.
-            Verdict::Inconclusive => format!("{}{padding}", label.dimmed()),
+            // Unknown is an absence of a verdict, not a soft one -- dim keeps it from reading as an action.
+            Verdict::Unknown => format!("{}{padding}", label.dimmed()),
             Verdict::Keep => format!("{}{padding}", label.green()),
         }
     } else {
@@ -190,8 +190,8 @@ fn where_column(dep: &DepReport) -> String {
         return truncate_front(evidence, WHERE_MAX_WIDTH);
     }
     // The marker is the whole reason there's no verdict, so it belongs in the report rather than a footnote.
-    if dep.verdict == Verdict::Inconclusive {
-        let reason = dep.inconclusive_reason.as_deref().unwrap_or("--");
+    if dep.verdict == Verdict::Unknown {
+        let reason = dep.unknown_reason.as_deref().unwrap_or("--");
         return truncate_front(reason, WHERE_MAX_WIDTH);
     }
     if dep.locations.is_empty() {
@@ -199,7 +199,7 @@ fn where_column(dep: &DepReport) -> String {
     }
     let (first_path, first_line) = &dep.locations[0];
     let raw = match dep.verdict {
-        Verdict::Drop | Verdict::Registered | Verdict::Inconclusive => return "--".to_string(),
+        Verdict::Drop | Verdict::Registered | Verdict::Unknown => return "--".to_string(),
         Verdict::Inline => format!("{first_path}:{first_line}"),
         Verdict::Keep => {
             if dep.locations.len() == 1 {
@@ -251,7 +251,7 @@ fn verdict_label(verdict: Verdict) -> &'static str {
         Verdict::Drop => "drop",
         Verdict::Inline => "inline",
         Verdict::Registered => "registered",
-        Verdict::Inconclusive => "inconclusive",
+        Verdict::Unknown => "unknown",
         Verdict::Keep => "keep",
     }
 }
@@ -274,7 +274,7 @@ mod tests {
             usage,
             locations: vec![],
             registration: None,
-            inconclusive_reason: None,
+            unknown_reason: None,
         }
     }
 

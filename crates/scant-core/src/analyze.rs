@@ -38,7 +38,7 @@ pub enum Verdict {
     Drop,
     Inline,
     Registered,
-    Inconclusive,
+    Unknown,
     Keep,
 }
 
@@ -89,8 +89,8 @@ pub struct DepReport {
     pub locations: Vec<(String, u32)>,
     // How this dependency is loaded when nothing imports it -- the entry-point group, or the console script it installs. `Some` only for Registered.
     pub registration: Option<String>,
-    // Why no verdict could be reached. `Some` only for Inconclusive.
-    pub inconclusive_reason: Option<String>,
+    // Why no verdict could be reached. `Some` only for Unknown.
+    pub unknown_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -277,7 +277,7 @@ fn build_dep_report(
     let registration = (verdict == Verdict::Registered)
         .then(|| entry_points.map(EntryPoints::evidence))
         .flatten();
-    let inconclusive_reason = (verdict == Verdict::Inconclusive)
+    let unknown_reason = (verdict == Verdict::Unknown)
         .then(|| {
             dep.marker
                 .contents()
@@ -296,7 +296,7 @@ fn build_dep_report(
         usage,
         locations,
         registration,
-        inconclusive_reason,
+        unknown_reason,
     }
 }
 
@@ -322,7 +322,7 @@ fn classify(
         }
         // A dependency gated to another platform cannot be installed here, so zero imports is not evidence of anything. Saying so is the honest answer; "drop" would be a guess dressed as a finding.
         if !signals.installable_here {
-            return (Verdict::Inconclusive, UsageBand::None);
+            return (Verdict::Unknown, UsageBand::None);
         }
         return (Verdict::Drop, UsageBand::None);
     }
@@ -469,10 +469,10 @@ mod tests {
     }
 
     #[test]
-    fn marker_gated_dependency_is_inconclusive_not_dropped() {
+    fn marker_gated_dependency_is_unknown_not_dropped() {
         let t = default_thresholds();
 
-        // Zero imports + cannot install here -> Inconclusive. Superset declares `waitress; sys_platform == "win32"`, which can never resolve on Linux, so calling it unused would be a guess.
+        // Zero imports + cannot install here -> Unknown. Superset declares `waitress; sys_platform == "win32"`, which can never resolve on Linux, so calling it unused would be a guess.
         assert_eq!(
             classify(
                 0,
@@ -485,7 +485,7 @@ mod tests {
                 },
                 &t
             ),
-            (Verdict::Inconclusive, UsageBand::None)
+            (Verdict::Unknown, UsageBand::None)
         );
 
         // Registration still wins -- it is positive evidence, where a false marker is only absence of evidence.
@@ -548,7 +548,7 @@ mod tests {
 
         // A bare site-packages dir has no interpreter to ask, so there is no marker environment and nothing may be concluded -- it must stay Drop rather than becoming a guess in the other direction.
         assert_eq!(dep.verdict, Verdict::Drop);
-        assert!(dep.inconclusive_reason.is_none());
+        assert!(dep.unknown_reason.is_none());
 
         fs::remove_dir_all(&root).unwrap();
     }
