@@ -14,6 +14,7 @@ use crate::discover;
 use crate::manifest::{self, Dependency, ManifestError};
 use crate::namemap::{self, EntryPoints, NameMap, NameMapError};
 use crate::parse::{self, FileUsage};
+use pep508_rs::MarkerEnvironment;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Thresholds {
@@ -37,7 +38,27 @@ pub enum Verdict {
     Drop,
     Inline,
     Registered,
+    Inconclusive,
     Keep,
+}
+
+// The non-count inputs to a verdict. Grouped rather than passed as three adjacent booleans, where a transposed argument would silently invert a verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Signals {
+    pub is_wildcard: bool,
+    pub registers_entry_points: bool,
+    pub installable_here: bool,
+}
+
+impl Default for Signals {
+    fn default() -> Self {
+        // Installable unless we positively determine otherwise -- absence of a marker environment must never read as "cannot install".
+        Signals {
+            is_wildcard: false,
+            registers_entry_points: false,
+            installable_here: true,
+        }
+    }
 }
 
 /// Display-only usage scale -- never flips a verdict on its own.
@@ -68,6 +89,8 @@ pub struct DepReport {
     pub locations: Vec<(String, u32)>,
     // How this dependency is loaded when nothing imports it -- the entry-point group, or the console script it installs. `Some` only for Registered.
     pub registration: Option<String>,
+    // Why no verdict could be reached. `Some` only for Inconclusive.
+    pub inconclusive_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +143,8 @@ pub fn analyze(
     let site_packages =
         namemap::resolve_site_packages(python_env).map_err(AnalyzeError::NameMap)?;
     let name_map = namemap::build(&site_packages);
+    // Asked of the environment being scanned, not the host: a 3.9 venv inspected from a 3.13 machine must judge `python_version < "3.10"` as the venv sees it. `None` means we couldn't ask, which stays "unknown" rather than becoming a verdict.
+    let marker_env = namemap::marker_environment(python_env);
 
     let mut warnings = manifest.warnings.clone();
 
@@ -165,6 +190,7 @@ pub fn analyze(
                 &file_usages,
                 &wildcard_roots,
                 &thresholds,
+                marker_env.as_ref(),
                 root,
             )
         })
@@ -186,6 +212,7 @@ fn build_dep_report(
     file_usages: &[FileUsage],
     wildcard_roots: &HashSet<String>,
     thresholds: &Thresholds,
+    marker_env: Option<&MarkerEnvironment>,
     scan_root: &Path,
 ) -> DepReport {
     let import_roots = name_map.imports_for(&dep.name).cloned().unwrap_or_default();
@@ -228,18 +255,34 @@ fn build_dep_report(
     let files = files_with_usage.len() as u32;
     let symbol_count = symbols.len() as u32;
 
+    // Only a marker we can actually evaluate counts against installability. With no marker environment to judge against, every dependency stays installable-as-far-as-we-know.
+    let installable_here = match marker_env {
+        Some(env) => dep.marker.evaluate(env, &[]),
+        None => true,
+    };
+
     let entry_points = name_map.entry_points_for(&dep.name);
     let (verdict, usage) = classify(
         imports,
         files,
         lines_total,
         symbol_count,
-        is_wildcard,
-        entry_points.is_some(),
+        Signals {
+            is_wildcard,
+            registers_entry_points: entry_points.is_some(),
+            installable_here,
+        },
         thresholds,
     );
     let registration = (verdict == Verdict::Registered)
         .then(|| entry_points.map(EntryPoints::evidence))
+        .flatten();
+    let inconclusive_reason = (verdict == Verdict::Inconclusive)
+        .then(|| {
+            dep.marker
+                .contents()
+                .map(|m| format!("only installs when {m}"))
+        })
         .flatten();
 
     DepReport {
@@ -253,6 +296,7 @@ fn build_dep_report(
         usage,
         locations,
         registration,
+        inconclusive_reason,
     }
 }
 
@@ -261,21 +305,24 @@ fn classify(
     files: u32,
     lines: u32,
     symbols: u32,
-    is_wildcard: bool,
-    registers_entry_points: bool,
+    signals: Signals,
     thresholds: &Thresholds,
 ) -> (Verdict, UsageBand) {
     // `from x import *` creates no bindings, so we fundamentally can't
     // attribute usage to it -- never let that read as "unused" or "barely
     // used" when it might be exercised extensively via names we can't see.
-    if is_wildcard {
+    if signals.is_wildcard {
         return (Verdict::Keep, usage_band_for_keep(lines, thresholds));
     }
 
     // Registration only ever overrides Drop. A registered package that IS imported is still a fair inline/keep candidate -- suppressing that would cost the signal this tool exists for.
     if imports == 0 {
-        if registers_entry_points {
+        if signals.registers_entry_points {
             return (Verdict::Registered, UsageBand::None);
+        }
+        // A dependency gated to another platform cannot be installed here, so zero imports is not evidence of anything. Saying so is the honest answer; "drop" would be a guess dressed as a finding.
+        if !signals.installable_here {
+            return (Verdict::Inconclusive, UsageBand::None);
         }
         return (Verdict::Drop, UsageBand::None);
     }
@@ -331,39 +378,39 @@ mod tests {
 
         // imports == 0 -> Drop, regardless of anything else.
         assert_eq!(
-            classify(0, 0, 0, 0, false, false, &t),
+            classify(0, 0, 0, 0, Signals::default(), &t),
             (Verdict::Drop, UsageBand::None)
         );
 
         // Below all thresholds -> Inline/Trivial.
         assert_eq!(
-            classify(1, 1, 1, 1, false, false, &t),
+            classify(1, 1, 1, 1, Signals::default(), &t),
             (Verdict::Inline, UsageBand::Trivial)
         );
 
         // Exactly at the threshold boundary still counts as "below" (<=).
         assert_eq!(
-            classify(1, t.files, t.lines, t.symbols, false, false, &t),
+            classify(1, t.files, t.lines, t.symbols, Signals::default(), &t),
             (Verdict::Inline, UsageBand::Trivial)
         );
 
         // One line over any threshold -> Keep.
         assert_eq!(
-            classify(1, t.files, t.lines + 1, t.symbols, false, false, &t).0,
+            classify(1, t.files, t.lines + 1, t.symbols, Signals::default(), &t).0,
             Verdict::Keep
         );
 
         // Usage band boundaries (threshold_lines = 3): <=9 Light, <=30 Moderate, else Heavy.
         assert_eq!(
-            classify(1, 100, 9, 100, false, false, &t),
+            classify(1, 100, 9, 100, Signals::default(), &t),
             (Verdict::Keep, UsageBand::Light)
         );
         assert_eq!(
-            classify(1, 100, 30, 100, false, false, &t),
+            classify(1, 100, 30, 100, Signals::default(), &t),
             (Verdict::Keep, UsageBand::Moderate)
         );
         assert_eq!(
-            classify(1, 100, 287, 100, false, false, &t),
+            classify(1, 100, 287, 100, Signals::default(), &t),
             (Verdict::Keep, UsageBand::Heavy)
         );
     }
@@ -374,13 +421,136 @@ mod tests {
 
         // Zero imports + registration -> Registered instead of Drop. This is the Superset case: ~40 SQLAlchemy dialects that are loaded by connection string, never imported.
         assert_eq!(
-            classify(0, 0, 0, 0, false, true, &t),
+            classify(
+                0,
+                0,
+                0,
+                0,
+                Signals {
+                    registers_entry_points: true,
+                    ..Default::default()
+                },
+                &t
+            ),
             (Verdict::Registered, UsageBand::None)
         );
 
         // Registration must NOT rescue a package that IS imported from an inline verdict -- that would suppress the signal this tool exists for.
-        assert_eq!(classify(1, 1, 1, 1, false, true, &t).0, Verdict::Inline);
-        assert_eq!(classify(1, 100, 287, 100, false, true, &t).0, Verdict::Keep);
+        assert_eq!(
+            classify(
+                1,
+                1,
+                1,
+                1,
+                Signals {
+                    registers_entry_points: true,
+                    ..Default::default()
+                },
+                &t
+            )
+            .0,
+            Verdict::Inline
+        );
+        assert_eq!(
+            classify(
+                1,
+                100,
+                287,
+                100,
+                Signals {
+                    registers_entry_points: true,
+                    ..Default::default()
+                },
+                &t
+            )
+            .0,
+            Verdict::Keep
+        );
+    }
+
+    #[test]
+    fn marker_gated_dependency_is_inconclusive_not_dropped() {
+        let t = default_thresholds();
+
+        // Zero imports + cannot install here -> Inconclusive. Superset declares `waitress; sys_platform == "win32"`, which can never resolve on Linux, so calling it unused would be a guess.
+        assert_eq!(
+            classify(
+                0,
+                0,
+                0,
+                0,
+                Signals {
+                    installable_here: false,
+                    ..Default::default()
+                },
+                &t
+            ),
+            (Verdict::Inconclusive, UsageBand::None)
+        );
+
+        // Registration still wins -- it is positive evidence, where a false marker is only absence of evidence.
+        assert_eq!(
+            classify(
+                0,
+                0,
+                0,
+                0,
+                Signals {
+                    registers_entry_points: true,
+                    installable_here: false,
+                    ..Default::default()
+                },
+                &t
+            )
+            .0,
+            Verdict::Registered
+        );
+
+        // Platform-guarded code that DOES import it classifies normally: the marker only ever overrides Drop.
+        assert_eq!(
+            classify(
+                1,
+                1,
+                1,
+                1,
+                Signals {
+                    installable_here: false,
+                    ..Default::default()
+                },
+                &t
+            )
+            .0,
+            Verdict::Inline
+        );
+    }
+
+    #[test]
+    fn marker_for_another_platform_reports_the_marker_as_the_reason() {
+        let root = temp_dir("marker-gated");
+        fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"proj\"\ndependencies = [\"pywin32; sys_platform == 'win32'\", \"click\"]\n",
+        )
+        .unwrap();
+        let site_packages = root.join(".venv-fake");
+        // One unrelated dist so the directory is recognizable as site-packages at all.
+        let other = site_packages.join("click-8.1.7.dist-info");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("top_level.txt"), "click").unwrap();
+        fs::write(root.join("main.py"), "print('nothing')\n").unwrap();
+
+        let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
+        let dep = report
+            .deps
+            .iter()
+            .find(|d| d.display_name == "pywin32")
+            .unwrap();
+
+        // A bare site-packages dir has no interpreter to ask, so there is no marker environment and nothing may be concluded -- it must stay Drop rather than becoming a guess in the other direction.
+        assert_eq!(dep.verdict, Verdict::Drop);
+        assert!(dep.inconclusive_reason.is_none());
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -419,7 +589,17 @@ mod tests {
         let t = default_thresholds();
         // Without the override this would read as Inline (imports=1, but
         // files/lines/symbols all 0, which is <= every threshold).
-        let (verdict, _) = classify(1, 0, 0, 0, true, false, &t);
+        let (verdict, _) = classify(
+            1,
+            0,
+            0,
+            0,
+            Signals {
+                is_wildcard: true,
+                ..Default::default()
+            },
+            &t,
+        );
         assert_eq!(verdict, Verdict::Keep);
     }
 

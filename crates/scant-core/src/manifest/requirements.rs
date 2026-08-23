@@ -296,6 +296,8 @@ fn parse_editable(spec: &str) -> Option<Dependency> {
             return Some(Dependency {
                 name,
                 display_name: name_part,
+                // An editable/VCS spec carries no marker, so it is unconditionally declared.
+                marker: pep508_rs::MarkerTree::TRUE,
             });
         }
     }
@@ -320,6 +322,7 @@ fn parse_editable(spec: &str) -> Option<Dependency> {
         .map(|name| Dependency {
             name,
             display_name: candidate.to_string(),
+            marker: pep508_rs::MarkerTree::TRUE,
         })
 }
 
