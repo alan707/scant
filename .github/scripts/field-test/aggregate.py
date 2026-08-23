@@ -1,16 +1,20 @@
-"""Merge the per-repo result.json files into one markdown summary.
+"""Assemble one page of evidence: scant's own output, verbatim, for every repo in the run.
 
-Exits 1 if any repo failed operationally (scant exit 2, an unrecognized report, or a job
-that produced no result at all). Dependency-install failures are not counted as failures:
-they are environmental, and scant now reports uninstallable packages as `unknown` rather
-than `drop`, which is exactly the behaviour this run exists to confirm at scale.
+Deliberately not a summary table. The point of the field test is to show that scant runs on
+real projects across a wide size range, and scant's own header line already states the size
+and the time ("mlflow -- 62 packages declared, 2630 files read, 0.4s"). Re-deriving those
+numbers into a table of our own would be weaker evidence than the thing itself, so the only
+framing here is the repo name, how much of the manifest actually installed, and the order:
+smallest tree first, so the range reads as a ladder.
+
+Exits 1 if any repo failed operationally (scant exit 2, an unrecognized report, or a job that
+produced no result at all). Dependency-install failures are not counted as failures: they are
+environmental, and scant now reports uninstallable packages as `unknown` rather than `drop`.
 """
 
 import json
 import sys
 from pathlib import Path
-
-VERDICTS = ("drop", "inline", "registered", "unknown", "keep")
 
 
 def load(results_dir, expected):
@@ -18,58 +22,33 @@ def load(results_dir, expected):
     for entry in expected:
         path = results_dir / f"{entry['id']}.json"
         if path.is_file():
-            rows.append(json.loads(path.read_text()))
+            row = json.loads(path.read_text())
         else:
-            rows.append({"id": entry["id"], "repo": entry["repo"], "status": "no-result"})
+            row = {"id": entry["id"], "repo": entry["repo"], "status": "no-result"}
+        report = results_dir / f"{entry['id']}.txt"
+        row["report"] = report.read_text().rstrip() if report.is_file() else "(no output captured)"
+        rows.append(row)
     return rows
-
-
-def cell(row, key):
-    return str(row[key]) if key in row else "--"
 
 
 def main():
     results_dir = Path(sys.argv[1])
     expected = json.loads(Path(sys.argv[2]).read_text())
     rows = load(results_dir, expected)
+    # Smallest tree first; anything that never produced a report sorts last
+    rows.sort(key=lambda r: r.get("files", float("inf")))
 
-    out = ["## scant field test", ""]
-    version = next((r["scant_version"] for r in rows if r.get("scant_version")), "unknown")
-    out += [f"scant `{version}` against {len(rows)} real repositories.", ""]
-    out += ["| Repo | Declared | Installed | Files | drop | inline | registered | unknown | keep | Time | Status |"]
-    out += ["|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    version = next((r["scant_version"] for r in rows if r.get("scant_version")), "scant")
+    noun = "project" if len(rows) == 1 else "projects"
+    out = ["## scant field test", "", f"`{version}` against {len(rows)} real Python {noun}, smallest tree first.", ""]
+
     for row in rows:
-        installed = f"{cell(row, 'installed')}/{cell(row, 'install_attempted')}" if row.get("install_attempted") else "--"
-        seconds = f"{row['seconds']:.1f}s" if "seconds" in row else "--"
-        status = {"ok": "ok", "error": "**operational error**", "unparsed": "**unparsed output**", "no-result": "**no result**"}.get(row.get("status"), row.get("status", "?"))
-        out.append(
-            f"| [{row['repo']}](https://github.com/{row['repo']}) | {cell(row, 'declared')} | {installed} | "
-            f"{cell(row, 'files')} | " + " | ".join(cell(row, v) for v in VERDICTS) + f" | {seconds} | {status} |"
-        )
-
-    totals = {v: sum(row.get(v, 0) for row in rows) for v in VERDICTS}
-    out += ["", "**Totals** -- " + ", ".join(f"{v} {n}" for v, n in totals.items()) + ".", ""]
-
-    # The inline list is the whole reason this tool exists, so it gets named packages rather than a count
-    out += ["### Inline candidates (the differentiator)", ""]
-    for row in rows:
-        names = row.get("inline_names") or []
-        if names:
-            out.append(f"- **{row['repo']}** -- " + ", ".join(f"`{n}`" for n in names))
-    if not any(row.get("inline_names") for row in rows):
-        out.append("_None found._")
-
-    out += ["", "### Flagged to drop", ""]
-    for row in rows:
-        names = row.get("drop_names") or []
-        if names:
-            out.append(f"- **{row['repo']}** -- " + ", ".join(f"`{n}`" for n in names))
-    if not any(row.get("drop_names") for row in rows):
-        out.append("_None found._")
-
-    notes = [(row["repo"], note) for row in rows for note in row.get("notes", [])]
-    if notes:
-        out += ["", "### Warnings reported by scant", ""] + [f"- **{repo}** -- {note}" for repo, note in notes]
+        out.append(f"### [{row['repo']}](https://github.com/{row['repo']})")
+        if row.get("install_attempted"):
+            out.append(f"_{row['installed']} of {row['install_attempted']} declared packages installed via `{row['install_mode']}`._")
+        if row.get("status") != "ok":
+            out.append(f"**Failed: {row['status']}.**")
+        out += ["", "```", row["report"], "```", ""]
 
     print("\n".join(out))
 

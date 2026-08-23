@@ -132,19 +132,23 @@ jobs:
       - name: Clone ${{ matrix.repo }}
         env:
           REPO: ${{ matrix.repo }}
-        run: git clone --depth 1 "https://github.com/$REPO" "$RUNNER_TEMP/target"
+        run: |
+          # Clone under the repo's own name: scant titles its report after the directory it scanned, and "target" would make every report in the summary anonymous
+          target="$RUNNER_TEMP/${REPO##*/}"
+          git clone --depth 1 "https://github.com/$REPO" "$target"
+          echo "FT_TARGET=$target" >> "$GITHUB_ENV"
 
       - name: Install the target's declared dependencies
         env:
           PYTHON_PIN: ${{ matrix.python }}
-        run: .github/scripts/field-test/install-deps.sh "$RUNNER_TEMP/target" "$PYTHON_PIN"
+        run: .github/scripts/field-test/install-deps.sh "$FT_TARGET" "$PYTHON_PIN"
 
       - name: Run scant
         env:
           NO_COLOR: '1'
         run: |
           set +e
-          scant "$RUNNER_TEMP/target" --env "$RUNNER_TEMP/target/.venv" > "$RUNNER_TEMP/report.txt" 2>&1
+          scant "$FT_TARGET" --env "$FT_TARGET/.venv" > "$RUNNER_TEMP/report.txt" 2>&1
           echo "FT_EXIT=$?" >> "$GITHUB_ENV"
           set -e
           cat "$RUNNER_TEMP/report.txt"
