@@ -23,11 +23,15 @@ pub struct NameMap {
 pub struct EntryPoints {
     pub plugin_groups: BTreeSet<String>,
     pub console_scripts: BTreeSet<String>,
+    // Commands actually installed into the environment's bin/Scripts directory, read from RECORD. `entry_points.txt` is what a package *declares*; this is what got *installed*, which is the only signal for tools that ship a prebuilt binary (anything maturin-built: ruff, uv) rather than declaring a console_scripts entry.
+    pub installed_commands: BTreeSet<String>,
 }
 
 impl EntryPoints {
     pub fn is_empty(&self) -> bool {
-        self.plugin_groups.is_empty() && self.console_scripts.is_empty()
+        self.plugin_groups.is_empty()
+            && self.console_scripts.is_empty()
+            && self.installed_commands.is_empty()
     }
 
     // Short evidence for the report's WHERE column -- names the mechanism that loads it, never a bare assertion. See CLAUDE.md non-negotiable #9.
@@ -38,10 +42,16 @@ impl EntryPoints {
                 extra => format!("{first} +{extra} more"),
             };
         }
-        match self.console_scripts.iter().next() {
-            Some(first) => match self.console_scripts.len() - 1 {
+        if let Some(first) = self.console_scripts.iter().next() {
+            return match self.console_scripts.len() - 1 {
                 0 => format!("console_scripts: {first}"),
                 extra => format!("console_scripts: {first} +{extra} more"),
+            };
+        }
+        match self.installed_commands.iter().next() {
+            Some(first) => match self.installed_commands.len() - 1 {
+                0 => format!("ships a command: {first}"),
+                extra => format!("ships a command: {first} +{extra} more"),
             },
             None => String::new(),
         }
@@ -328,7 +338,11 @@ pub fn build(site_packages: &Path) -> NameMap {
             continue;
         };
 
-        let import_roots = import_roots_for_dist(&entry.path(), site_packages);
+        // RECORD is read even when top_level.txt supplies the import roots: it is the only place installed commands are listed, and a dist can have one without the other.
+        let (record_roots, installed_commands) = read_record_full(&entry.path(), site_packages);
+        let import_roots = read_top_level_txt(&entry.path())
+            .filter(|roots| !roots.is_empty())
+            .unwrap_or(record_roots);
         if !import_roots.is_empty() {
             dist_imports
                 .entry(package_name.clone())
@@ -336,7 +350,8 @@ pub fn build(site_packages: &Path) -> NameMap {
                 .extend(import_roots);
         }
 
-        let entry_points = read_entry_points(&entry.path());
+        let mut entry_points = read_entry_points(&entry.path());
+        entry_points.installed_commands = installed_commands;
         if !entry_points.is_empty() {
             dist_entry_points.insert(package_name, entry_points);
         }
@@ -386,15 +401,6 @@ fn read_entry_points(dist_info_dir: &Path) -> EntryPoints {
     found
 }
 
-fn import_roots_for_dist(dist_info_dir: &Path, site_packages: &Path) -> BTreeSet<String> {
-    if let Some(roots) = read_top_level_txt(dist_info_dir)
-        && !roots.is_empty()
-    {
-        return roots;
-    }
-    read_record(dist_info_dir, site_packages)
-}
-
 fn read_top_level_txt(dist_info_dir: &Path) -> Option<BTreeSet<String>> {
     let contents = std::fs::read_to_string(dist_info_dir.join("top_level.txt")).ok()?;
     Some(
@@ -410,15 +416,27 @@ fn read_top_level_txt(dist_info_dir: &Path) -> Option<BTreeSet<String>> {
 /// RECORD is CSV-shaped (`path,hash,size`) but hand-rolled here rather than
 /// via the `csv` crate: comma-containing filenames in real packages are
 /// effectively nonexistent, and this keeps the dependency list narrow.
-fn read_record(dist_info_dir: &Path, site_packages: &Path) -> BTreeSet<String> {
+// Returns the import roots and the commands this distribution installs. Both come out of one pass over RECORD, which we already read.
+fn read_record_full(
+    dist_info_dir: &Path,
+    site_packages: &Path,
+) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut roots = BTreeSet::new();
+    let mut commands = BTreeSet::new();
     let Ok(contents) = std::fs::read_to_string(dist_info_dir.join("RECORD")) else {
-        return roots;
+        return (roots, commands);
     };
 
     for line in contents.lines() {
         let path_field = line.split(',').next().unwrap_or("").trim();
-        if path_field.is_empty() || path_field.starts_with("..") {
+        if path_field.is_empty() {
+            continue;
+        }
+        // A path escaping site-packages into bin/ or Scripts/ is an installed command. Depth varies with layout (`../../../bin/ruff` in a venv), so match on the directory rather than a fixed number of `..` segments. These must still never become import roots.
+        if path_field.starts_with("..") {
+            if let Some(command) = installed_command_name(path_field) {
+                commands.insert(command);
+            }
             continue;
         }
         match path_field.split_once('/') {
@@ -444,7 +462,38 @@ fn read_record(dist_info_dir: &Path, site_packages: &Path) -> BTreeSet<String> {
         }
     }
 
-    roots
+    (roots, commands)
+}
+
+// `../../../bin/ruff` -> `ruff`. Windows installs a `.exe` alongside the script; both name the same command, so the extension is dropped to avoid reporting it twice.
+fn installed_command_name(path_field: &str) -> Option<String> {
+    let mut segments = path_field.split('/').peekable();
+    let mut in_bin = false;
+    while let Some(segment) = segments.next() {
+        if segment == "bin" || segment == "Scripts" {
+            in_bin = segments.peek().is_some();
+            continue;
+        }
+        if in_bin {
+            // Only a direct child of bin/ is a command; anything deeper is data that happens to live there.
+            if segments.peek().is_some() {
+                return None;
+            }
+            // A `.py` file in bin/ comes from setup.py's legacy `scripts=` list -- typically a demo or helper (xlrd ships `runxlrd.py`), not the reason anyone depends on the package. Real console entry points install as extensionless launchers, so counting these would suppress genuine findings on evidence that doesn't support them.
+            if segment.ends_with(".py") {
+                return None;
+            }
+            let name = segment
+                .strip_suffix(".exe")
+                .or_else(|| segment.strip_suffix(".EXE"))
+                .unwrap_or(segment);
+            if name.is_empty() {
+                return None;
+            }
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 /// Where an auto-detected Python environment came from -- surfaced in
@@ -762,6 +811,62 @@ mod tests {
     }
 
     #[test]
+    fn record_reports_installed_commands_without_entry_points() {
+        let dir = temp_dir("installed-commands");
+        fs::create_dir_all(&dir).unwrap();
+        // ruff's real shape: a maturin-built wheel that ships a prebuilt binary and declares no console_scripts at all.
+        fs::write(
+            dir.join("RECORD"),
+            "../../../bin/ruff,sha256=abc,21968200\nruff-0.16.4.dist-info/METADATA,sha256=def,26351\n",
+        )
+        .unwrap();
+
+        let (roots, commands) = read_record_full(&dir, &dir);
+        assert_eq!(commands, BTreeSet::from(["ruff".to_string()]));
+        // The command must not leak into import roots.
+        assert!(roots.is_empty());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn installed_command_name_handles_layouts_and_ignores_non_commands() {
+        assert_eq!(
+            installed_command_name("../../../bin/ruff"),
+            Some("ruff".to_string())
+        );
+        // Windows ships a .exe alongside; both name one command.
+        assert_eq!(
+            installed_command_name("../../Scripts/black.exe"),
+            Some("black".to_string())
+        );
+        // Anything deeper than a direct child of bin/ is data, not a command.
+        assert_eq!(installed_command_name("../../../bin/share/thing"), None);
+        // A path escaping site-packages for some other reason is not a command.
+        assert_eq!(installed_command_name("../../../etc/jupyter/config"), None);
+        // A legacy setup.py `scripts=` entry is a helper, not a console entry point -- xlrd's real shape.
+        assert_eq!(installed_command_name("../../../bin/runxlrd.py"), None);
+    }
+
+    #[test]
+    fn console_scripts_take_precedence_over_installed_commands_in_evidence() {
+        // A dist with both should describe the declaration, which is the more precise fact.
+        let found = EntryPoints {
+            plugin_groups: BTreeSet::new(),
+            console_scripts: BTreeSet::from(["pre-commit".to_string()]),
+            installed_commands: BTreeSet::from(["pre-commit".to_string()]),
+        };
+        assert_eq!(found.evidence(), "console_scripts: pre-commit");
+
+        let binary_only = EntryPoints {
+            plugin_groups: BTreeSet::new(),
+            console_scripts: BTreeSet::new(),
+            installed_commands: BTreeSet::from(["ruff".to_string()]),
+        };
+        assert_eq!(binary_only.evidence(), "ships a command: ruff");
+    }
+
+    #[test]
     fn resolves_pillow_to_pil_via_top_level_txt() {
         let site_packages = temp_dir("pillow");
         write_top_level(&site_packages, "Pillow-10.0.0.dist-info", &["PIL"]);
@@ -933,11 +1038,24 @@ mod tests {
     /// concurrently. Every such test clears both vars first and doesn't set
     /// them to anything another test would observe, which keeps this safe in
     /// practice even without a lock -- worth revisiting if that ever changes.
-    fn clear_env_vars() {
+    // Tests run in parallel threads inside one process, and these helpers mutate process-global environment variables. Without serializing them, one test restores PATH while another is still relying on it -- which is exactly how this suite started failing in CI while passing locally.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // A panicking test poisons the lock, but what it guards is the environment itself, which every helper restores on its own way out.
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    // The returned guard must be held by the caller for the rest of the test, so no other test can change these out from under it. MutexGuard is already #[must_use], so binding it is enforced.
+    fn clear_env_vars() -> std::sync::MutexGuard<'static, ()> {
+        let guard = lock_env();
         unsafe {
             std::env::remove_var("VIRTUAL_ENV");
             std::env::remove_var("CONDA_PREFIX");
         }
+        guard
     }
 
     #[test]
@@ -958,7 +1076,7 @@ mod tests {
     fn detect_python_env_falls_back_to_local_venv_dir() {
         let root = temp_dir("detect-local-venv");
         fs::create_dir_all(root.join(".venv")).unwrap();
-        clear_env_vars();
+        let _env = clear_env_vars();
 
         match detect_python_env(None, &root) {
             PythonEnvDetection::Found { path, source } => {
@@ -974,7 +1092,7 @@ mod tests {
     #[test]
     fn detect_python_env_not_found_when_nothing_resolves() {
         let root = temp_dir("detect-none");
-        clear_env_vars();
+        let _env = clear_env_vars();
         assert_eq!(detect_python_env(None, &root), PythonEnvDetection::NotFound);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -985,7 +1103,7 @@ mod tests {
         // Not named .venv/venv -- only discoverable via the pyvenv.cfg marker.
         fs::create_dir_all(root.join("env311")).unwrap();
         fs::write(root.join("env311").join("pyvenv.cfg"), "").unwrap();
-        clear_env_vars();
+        let _env = clear_env_vars();
 
         match detect_python_env(None, &root) {
             PythonEnvDetection::Found { path, source } => {
@@ -1005,7 +1123,7 @@ mod tests {
             fs::create_dir_all(root.join(name)).unwrap();
             fs::write(root.join(name).join("pyvenv.cfg"), "").unwrap();
         }
-        clear_env_vars();
+        let _env = clear_env_vars();
 
         match detect_python_env(None, &root) {
             PythonEnvDetection::Ambiguous(candidates) => {
@@ -1085,6 +1203,7 @@ mod tests {
     /// under Rust's default multi-threaded test execution.
     #[cfg(unix)]
     fn with_path_override<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let _env = lock_env();
         let original = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("PATH", dir);
