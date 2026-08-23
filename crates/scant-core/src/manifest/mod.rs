@@ -27,6 +27,8 @@ use pep508_rs::PackageName;
 pub struct Dependency {
     pub name: PackageName,
     pub display_name: String,
+    // The PEP 508 environment marker, kept rather than discarded: a dependency gated to another platform can never install here, so its absence from site-packages proves nothing about whether the project uses it.
+    pub marker: pep508_rs::MarkerTree,
 }
 
 /// Which manifest file ended up authoritative.
@@ -107,9 +109,11 @@ pub(crate) struct DetectorResult {
 /// Parses one PEP 508 requirement string into a [`Dependency`], keeping the
 /// name exactly as spelled (before PEP 503 normalization) for display.
 /// Never hand-splits on version operators -- always goes through
-/// `pep508_rs`, which also discards any environment marker (a
-/// marker-gated dependency, e.g. `colorama; platform_system == 'Windows'`,
-/// is still declared).
+/// `pep508_rs`. The environment marker is kept on the [`Dependency`]
+/// rather than discarded: a marker-gated dependency (e.g.
+/// `colorama; platform_system == 'Windows'`) is still declared, but on a
+/// platform where the marker is false it can never be installed, so its
+/// absence from site-packages must not read as unused.
 pub(crate) fn parse_requirement(raw: &str) -> Result<Dependency, String> {
     let trimmed = raw.trim();
     match trimmed.parse::<pep508_rs::Requirement>() {
@@ -121,6 +125,7 @@ pub(crate) fn parse_requirement(raw: &str) -> Result<Dependency, String> {
             Ok(Dependency {
                 name: req.name,
                 display_name,
+                marker: req.marker,
             })
         }
         Err(e) => Err(e.to_string()),

@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use pep508_rs::PackageName;
+use pep508_rs::{MarkerEnvironment, MarkerEnvironmentBuilder, PackageName};
 
 /// import root -> distribution name, and the reverse, for every distribution
 /// installed in a resolved site-packages directory.
@@ -232,6 +232,72 @@ pub fn resolve_site_packages(python_path: &Path) -> Result<PathBuf, NameMapError
     Err(NameMapError::NoSitePackages {
         python_path: python_path.to_path_buf(),
     })
+}
+
+// The PEP 508 marker environment, asked of the target interpreter rather than sensed from the host -- scanning a Linux container from a Mac must judge `sys_platform == 'win32'` against the environment being scanned.
+// Prints one field per line in a fixed order rather than JSON, so no serialization dependency is needed. No field can contain a newline.
+const MARKER_ENV_SCRIPT: &str = "import platform, sys, os; \
+print(sys.implementation.name); \
+print('.'.join(str(p) for p in sys.implementation.version[:3])); \
+print(os.name); \
+print(platform.machine()); \
+print(platform.python_implementation()); \
+print(platform.release()); \
+print(platform.system()); \
+print(platform.version()); \
+print(platform.python_version()); \
+print('.'.join(platform.python_version_tuple()[:2])); \
+print(sys.platform)";
+
+// Returns None when there is no interpreter to ask (a bare site-packages dir) or it can't be run. Callers must treat that as "unknown", never as "the marker is false" -- guessing here would invent the false positives this exists to prevent.
+pub fn marker_environment(python_path: &Path) -> Option<MarkerEnvironment> {
+    let interpreter = if is_executable_file(python_path) {
+        python_path.to_path_buf()
+    } else {
+        find_interpreter_in(python_path)?
+    };
+
+    let output = std::process::Command::new(&interpreter)
+        .args(["-c", MARKER_ENV_SCRIPT])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let fields: Vec<&str> = stdout.lines().map(str::trim).collect();
+    let [
+        implementation_name,
+        implementation_version,
+        os_name,
+        platform_machine,
+        platform_python_implementation,
+        platform_release,
+        platform_system,
+        platform_version,
+        python_full_version,
+        python_version,
+        sys_platform,
+    ] = fields.as_slice()
+    else {
+        return None;
+    };
+
+    MarkerEnvironment::try_from(MarkerEnvironmentBuilder {
+        implementation_name,
+        implementation_version,
+        os_name,
+        platform_machine,
+        platform_python_implementation,
+        platform_release,
+        platform_system,
+        platform_version,
+        python_full_version,
+        python_version,
+        sys_platform,
+    })
+    .ok()
 }
 
 /// Reads every `*.dist-info/RECORD` (falling back to `top_level.txt`) under
