@@ -48,6 +48,8 @@ pub struct Signals {
     pub is_wildcard: bool,
     pub registers_entry_points: bool,
     pub installable_here: bool,
+    // Whether the distribution was actually found in the environment. `drop` is a destructive recommendation, so it requires positive confirmation the package is there and unimported -- never merely that we failed to find it.
+    pub installed: bool,
 }
 
 impl Default for Signals {
@@ -57,6 +59,7 @@ impl Default for Signals {
             is_wildcard: false,
             registers_entry_points: false,
             installable_here: true,
+            installed: true,
         }
     }
 }
@@ -261,6 +264,7 @@ fn build_dep_report(
         None => true,
     };
 
+    let installed = name_map.contains(&dep.name);
     let entry_points = name_map.entry_points_for(&dep.name);
     let (verdict, usage) = classify(
         imports,
@@ -271,19 +275,23 @@ fn build_dep_report(
             is_wildcard,
             registers_entry_points: entry_points.is_some(),
             installable_here,
+            installed,
         },
         thresholds,
     );
     let registration = (verdict == Verdict::Registered)
         .then(|| entry_points.map(EntryPoints::evidence))
         .flatten();
-    let unknown_reason = (verdict == Verdict::Unknown)
-        .then(|| {
-            dep.marker
-                .contents()
-                .map(|m| format!("only installs when {m}"))
-        })
-        .flatten();
+    // The marker is the most specific explanation when it applies -- it says why the package isn't there, not merely that it isn't. Otherwise distinguish a package that is absent from one that is present but tells us nothing about its import names.
+    let unknown_reason = (verdict == Verdict::Unknown).then(|| {
+        if let Some(marker) = dep.marker.contents() {
+            return format!("only installs when {marker}");
+        }
+        if name_map.is_present(&dep.name) {
+            return "installed, but its import names couldn't be determined".to_string();
+        }
+        "declared, but not installed in this environment".to_string()
+    });
 
     DepReport {
         display_name: dep.display_name.clone(),
@@ -322,6 +330,10 @@ fn classify(
         }
         // A dependency gated to another platform cannot be installed here, so zero imports is not evidence of anything. Saying so is the honest answer; "drop" would be a guess dressed as a finding.
         if !signals.installable_here {
+            return (Verdict::Unknown, UsageBand::None);
+        }
+        // Nothing resolved for this name: not installed, or installed with metadata we can't read (legacy `.egg-info`). Either way its import roots are unknown, so zero measured imports means nothing.
+        if !signals.installed {
             return (Verdict::Unknown, UsageBand::None);
         }
         return (Verdict::Drop, UsageBand::None);
@@ -529,14 +541,14 @@ mod tests {
         let root = temp_dir("marker-gated");
         fs::write(
             root.join("pyproject.toml"),
-            "[project]\nname = \"proj\"\ndependencies = [\"pywin32; sys_platform == 'win32'\", \"click\"]\n",
+            "[project]\nname = \"proj\"\ndependencies = [\"pywin32; sys_platform == 'win32'\"]\n",
         )
         .unwrap();
         let site_packages = root.join(".venv-fake");
-        // One unrelated dist so the directory is recognizable as site-packages at all.
-        let other = site_packages.join("click-8.1.7.dist-info");
-        fs::create_dir_all(&other).unwrap();
-        fs::write(other.join("top_level.txt"), "click").unwrap();
+        // pywin32 must actually be installed here, so the only thing in question is whether its marker can be evaluated.
+        let installed = site_packages.join("pywin32-306.dist-info");
+        fs::create_dir_all(&installed).unwrap();
+        fs::write(installed.join("top_level.txt"), "win32api").unwrap();
         fs::write(root.join("main.py"), "print('nothing')\n").unwrap();
 
         let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
@@ -551,6 +563,138 @@ mod tests {
         assert!(dep.unknown_reason.is_none());
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_dependency_that_resolves_to_nothing_is_unknown_not_dropped() {
+        let root = temp_dir("unresolvable");
+        fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"proj\"\ndependencies = [\"feedgen\", \"click\"]\n",
+        )
+        .unwrap();
+
+        let site_packages = root.join(".venv-fake");
+        // Only click resolves. feedgen stands in for the two ways a declared dependency can go missing: never installed, or installed with metadata scant cannot read (legacy `.egg-info`).
+        let click = site_packages.join("click-8.1.7.dist-info");
+        fs::create_dir_all(&click).unwrap();
+        fs::write(click.join("top_level.txt"), "click").unwrap();
+        // Used heavily so it lands on `keep`, leaving the unknown verdict as the only thing that could make this a finding.
+        let heavy_use: String = std::iter::once("import click\n".to_string())
+            .chain((0..12).map(|i| format!("click.echo('{i}')\n")))
+            .collect();
+        fs::write(root.join("main.py"), heavy_use).unwrap();
+
+        let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
+        let feedgen = report
+            .deps
+            .iter()
+            .find(|d| d.display_name == "feedgen")
+            .unwrap();
+
+        // Telling someone to delete a package we never even found is the most damaging thing this tool can do.
+        assert_eq!(feedgen.verdict, Verdict::Unknown);
+        assert_eq!(
+            feedgen.unknown_reason.as_deref(),
+            Some("declared, but not installed in this environment")
+        );
+        assert!(!report.has_findings());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_present_dependency_with_no_import_names_says_so() {
+        let root = temp_dir("present-no-imports");
+        fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"proj\"\ndependencies = [\"fastmcp\"]\n",
+        )
+        .unwrap();
+
+        // fastmcp's real shape: a metapackage whose dist-info is present but which ships no importable modules at all.
+        let site_packages = root.join(".venv-fake");
+        let dist_info = site_packages.join("fastmcp-3.4.7.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        fs::write(
+            dist_info.join("RECORD"),
+            "fastmcp-3.4.7.dist-info/METADATA,,\n",
+        )
+        .unwrap();
+        fs::write(root.join("main.py"), "print('nothing')\n").unwrap();
+
+        let dep = &analyze(&root, &site_packages, Thresholds::default())
+            .unwrap()
+            .deps[0];
+
+        assert_eq!(dep.verdict, Verdict::Unknown);
+        // Claiming it isn't installed would be false -- it is, it just tells us nothing.
+        assert_eq!(
+            dep.unknown_reason.as_deref(),
+            Some("installed, but its import names couldn't be determined")
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn egg_info_metadata_counts_as_present() {
+        let root = temp_dir("egg-info-present");
+        fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"proj\"\ndependencies = [\"feedgen\"]\n",
+        )
+        .unwrap();
+
+        // Legacy metadata scant cannot yet read (see #40) -- but it is proof the package is installed, so the reason must not claim otherwise.
+        let site_packages = root.join(".venv-fake");
+        fs::create_dir_all(site_packages.join("feedgen-1.0.0.egg-info")).unwrap();
+        // A directory holding only `.egg-info` isn't recognized as site-packages at all, so give it one ordinary dist.
+        let click = site_packages.join("click-8.1.7.dist-info");
+        fs::create_dir_all(&click).unwrap();
+        fs::write(click.join("top_level.txt"), "click").unwrap();
+        fs::write(root.join("main.py"), "print('nothing')\n").unwrap();
+
+        let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
+        let dep = report
+            .deps
+            .iter()
+            .find(|d| d.display_name == "feedgen")
+            .unwrap();
+
+        assert_eq!(dep.verdict, Verdict::Unknown);
+        assert_eq!(
+            dep.unknown_reason.as_deref(),
+            Some("installed, but its import names couldn't be determined")
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn drop_requires_confirming_the_package_is_installed() {
+        let t = default_thresholds();
+
+        // Installed and unimported is the only shape that earns a drop.
+        assert_eq!(
+            classify(0, 0, 0, 0, Signals::default(), &t).0,
+            Verdict::Drop
+        );
+        assert_eq!(
+            classify(
+                0,
+                0,
+                0,
+                0,
+                Signals {
+                    installed: false,
+                    ..Default::default()
+                },
+                &t
+            )
+            .0,
+            Verdict::Unknown
+        );
     }
 
     #[test]

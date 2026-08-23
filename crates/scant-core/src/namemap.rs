@@ -4,7 +4,7 @@
 //! `PyYAML` -> `yaml`, `python-socketio` -> `socketio` have no derivable
 //! relationship to their distribution names. See CLAUDE.md non-negotiable #3.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,8 @@ use pep508_rs::{MarkerEnvironment, MarkerEnvironmentBuilder, PackageName};
 pub struct NameMap {
     dist_imports: HashMap<PackageName, BTreeSet<String>>,
     dist_entry_points: HashMap<PackageName, EntryPoints>,
+    // Every distribution whose metadata directory is present, whether or not we could determine its import names. Distinguishes "not installed" from "installed but we can't read it" -- a metapackage that ships no modules, or legacy `.egg-info` metadata.
+    dists_present: HashSet<PackageName>,
 }
 
 // Entry points a distribution registers in `entry_points.txt`. Anything registering one is loaded by name at runtime -- a framework resolving a plugin, or a shell running a command -- so zero imports is expected, not unused. See CLAUDE.md non-negotiable #4.
@@ -68,6 +70,11 @@ impl NameMap {
 
     pub fn contains(&self, dist: &PackageName) -> bool {
         self.dist_imports.contains_key(dist)
+    }
+
+    // Whether the distribution's metadata is physically present, even if no import names could be derived from it.
+    pub fn is_present(&self, dist: &PackageName) -> bool {
+        self.dists_present.contains(dist)
     }
 
     // Entry points this distribution registers, if it registers any.
@@ -315,17 +322,26 @@ pub fn marker_environment(python_path: &Path) -> Option<MarkerEnvironment> {
 pub fn build(site_packages: &Path) -> NameMap {
     let mut dist_imports: HashMap<PackageName, BTreeSet<String>> = HashMap::new();
     let mut dist_entry_points: HashMap<PackageName, EntryPoints> = HashMap::new();
+    let mut dists_present: HashSet<PackageName> = HashSet::new();
 
     let Ok(entries) = std::fs::read_dir(site_packages) else {
         return NameMap {
             dist_imports,
             dist_entry_points,
+            dists_present,
         };
     };
 
     for entry in entries.filter_map(Result::ok) {
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
+        // `.egg-info` is recorded as present but never read for import roots -- that is issue #40's job. Knowing it is there is enough to avoid claiming the package isn't installed.
+        if let Some(dirname) = name.strip_suffix(".egg-info")
+            && let Some(package_name) = package_name_from_metadata_dirname(dirname)
+        {
+            dists_present.insert(package_name);
+            continue;
+        }
         let Some(dirname) = name.strip_suffix(".dist-info") else {
             continue;
         };
@@ -337,6 +353,7 @@ pub fn build(site_packages: &Path) -> NameMap {
         let Ok(package_name) = PackageName::new(escaped_name.to_string()) else {
             continue;
         };
+        dists_present.insert(package_name.clone());
 
         // RECORD is read even when top_level.txt supplies the import roots: it is the only place installed commands are listed, and a dist can have one without the other.
         let (record_roots, installed_commands) = read_record_full(&entry.path(), site_packages);
@@ -360,7 +377,17 @@ pub fn build(site_packages: &Path) -> NameMap {
     NameMap {
         dist_imports,
         dist_entry_points,
+        dists_present,
     }
+}
+
+// `.egg-info` dirnames are either `name-version` or a bare `name`, unlike `.dist-info` which always carries a version.
+fn package_name_from_metadata_dirname(dirname: &str) -> Option<PackageName> {
+    let candidate = match dirname.rsplit_once('-') {
+        Some((name, version)) if version.chars().next().is_some_and(|c| c.is_ascii_digit()) => name,
+        _ => dirname,
+    };
+    PackageName::new(candidate.to_string()).ok()
 }
 
 // `entry_points.txt` is INI-shaped, but hand-rolled here for the same reason RECORD is: the format is trivial, and configparser would case-fold the group and script names we want to show verbatim.
