@@ -42,8 +42,8 @@ plain `pip` puts it inside whichever environment is active, which is usually
 the project venv it is about to read; `pipx` and `uv tool` keep it on `$PATH`
 and out of the way.
 
-You can also run it as a Github Action to confirm the dependencies you have are
-actually necessary.
+You can also run it in CI to confirm the dependencies you have are actually
+necessary.
 
 ## Usage
 
@@ -53,8 +53,7 @@ actually necessary.
 
 A dependency is "barely used" when it stays under *all three* thresholds:
 `--threshold-lines` (default 3), `--threshold-files` (2), and
-`--threshold-symbols` (1). A candidate to inline is one that has max 3 lines
-of code and could be potentially blocking you from upgrading python versions.
+`--threshold-symbols` (1).
 
 Exit codes: `0` nothing to act on, `1` findings, `2` something went wrong
 (no manifest, no Python environment). `registered` and `unknown` are not
