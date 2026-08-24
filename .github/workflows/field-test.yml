@@ -41,6 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.select.outputs.matrix }}
+      scant_version: ${{ steps.version.outputs.scant_version }}
     steps:
       - uses: actions/checkout@v7
       - id: select
@@ -62,6 +63,29 @@ jobs:
           )
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "$matrix" | python3 -c "import json,sys; print('\n'.join(r['repo'] for r in json.load(sys.stdin)))"
+
+      # Resolved once here and pinned for every job. Left unpinned, each runner installs whatever the index serves it at the moment it starts -- on release day that silently split one run across two versions, and three jobs failed on a flag the older one didn't have.
+      - id: version
+        if: inputs.scant_source == 'pypi'
+        env:
+          REQUESTED: ${{ inputs.scant_version }}
+        run: |
+          if [ -n "$REQUESTED" ]; then
+            echo "scant_version=$REQUESTED" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pip install --quiet --disable-pip-version-check packaging
+          resolved=$(python3 - <<'PY'
+          import json, urllib.request
+          from packaging.version import Version
+
+          with urllib.request.urlopen("https://pypi.org/pypi/scant/json") as response:
+              releases = json.load(response)["releases"]
+          print(max((v for v, files in releases.items() if files), key=Version))
+          PY
+          )
+          echo "Resolved latest scant to $resolved"
+          echo "scant_version=$resolved" >> "$GITHUB_OUTPUT"
 
   build-scant:
     name: Build scant from source
@@ -111,7 +135,7 @@ jobs:
       - name: Install scant from PyPI
         if: inputs.scant_source == 'pypi'
         env:
-          VERSION: ${{ inputs.scant_version }}
+          VERSION: ${{ needs.plan.outputs.scant_version }}
         run: |
           # An isolated tool environment, never the target's venv -- installing scant into the
           # environment under test would add metadata scant then has to reason about
