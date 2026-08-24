@@ -90,25 +90,26 @@ code into the repo.
 
 ## What the verdicts mean
 
-**drop**: declared but and never imported. The only destructive
+**drop**: declared, installed, and never imported. The only destructive
 recommendation `scant` makes. This is similar to other python dependency
 finders.
 
-**inline**: used so little that copying the code into your codebase probably 
-makes more sense that using another dependency. 
-This is the whole reason signal `scant` exists and what separates 
+**inline**: used so little that copying the code into your codebase probably
+makes more sense than carrying another dependency. This is the whole reason
+`scant` exists, and what separates it from unused-dependency finders like
+deptry.
 
 **keep**: genuinely used.
 
 **registered**: never imported, but something loads it by name at runtime:
 a SQLAlchemy dialect, a pytest plugin, a Django app in `INSTALLED_APPS`, a
-shell command, or a driver another package imports on your behalf. 
+shell command, or a driver another package imports on your behalf.
 
-**unknown**: `scant` can't judge it because it doesn't have the right OS or 
+**unknown**: `scant` can't judge it because it doesn't have the right OS or
 platform (`only installs when sys_platform == 'win32'`), not installed, or installed
-with metadata that reveals no import names. 
+with metadata that reveals no import names.
 
-Every verdict shows the numbers behind it. 
+Every verdict shows the numbers behind it.
 
 ## Dependencies loaded by something else
 
@@ -120,7 +121,7 @@ rest, the only record is the other package's own source:
     scant . --safe-to-scan-site-packages
 
 Off by default because you might be running `scant` in an environment with random
-dependencies installed. If you know the site-packages are the ones form the repo,
+dependencies installed. If you know the site-packages are the ones from the repo,
 you can use that flag.
 
 ## Pointing at a different environment
