@@ -23,6 +23,16 @@ Written in rust ⚡️
     scant . --env path/to/venv
     scant . --env path/to/venv/bin/python
 
+A dependency is "barely used" when it stays under *all three* thresholds:
+`--threshold-lines` (default 3), `--threshold-files` (2), and
+`--threshold-symbols` (1). One symbol imported on two lines of one file is a
+candidate to inline; the same symbol used across nine files is not.
+
+Exit codes: `0` nothing to act on, `1` findings, `2` something went wrong
+(no manifest, no Python environment). `registered` and `unknown` are not
+findings and don't affect the exit code, so `scant .` works as a CI gate
+without failing on dependencies it merely can't judge.
+
 `scant` needs to read your dependencies' *installed* metadata to map a declared
 name to what you actually import (e.g. `PyYAML` -> `yaml`) -- there's no
 reliable way to do that without them being installed somewhere. It looks, in
@@ -56,17 +66,58 @@ rather than guessing:
 
 ## Example output
 
-    mkdocs -- 15 packages declared, 65 files read, 0.4s
-    Plan: drop 3, inline 4, keep 8.
+    mkdocs -- 15 packages declared, 65 files read, 0.1s
+    Plan: drop 0, inline 4, unknown 3, keep 8.
 
-      ACTION  PACKAGE             USES  LINES  USE       WHERE
-      drop    colorama               0      0  none      --
+      ACTION   PACKAGE             USES  LINES  USE       WHERE
+      inline   markupsafe             1      1  trivial   mkdocs/utils/templates.py:55
+      inline   mergedeep              1      1  trivial   mkdocs/utils/yaml.py:149
+      inline   pyyaml_env_tag         1      1  trivial   mkdocs/utils/yaml.py:120
 
-      inline  markupsafe             1      1  trivial   mkdocs/utils/templates.py:55
-      inline  pyyaml_env_tag         1      1  trivial   mkdocs/utils/yaml.py:120
+      unknown  babel                  0      0  none      declared, but not installed in this environment
+      unknown  colorama               0      0  none      only installs when platform_system == 'Windows'
 
-      keep    click                  4     41  heavy     mkdocs/__main__.py +3 files
-      keep    watchdog               2      2  light     mkdocs/livereload/__init__.py
+      keep     click                  4     41  heavy     mkdocs/__main__.py +3 files
+      keep     watchdog               2      2  light     mkdocs/livereload/__init__.py
+
+## What the verdicts mean
+
+**drop** -- declared, installed, and never imported. The only destructive
+recommendation `scant` makes, so it requires positive proof the package is
+there and unused, never merely that nothing was found.
+
+**inline** -- used so little that copying the code in probably beats carrying
+the dependency. This is the signal `scant` exists for; the `WHERE` column
+gives you the exact line.
+
+**keep** -- genuinely used.
+
+**registered** -- never imported, but something loads it by name at runtime:
+a SQLAlchemy dialect, a pytest plugin, a Django app in `INSTALLED_APPS`, a
+shell command, or a driver another package imports on your behalf. The
+`WHERE` column names the mechanism, so you can check the claim rather than
+take it.
+
+**unknown** -- `scant` can't judge it. Gated to another platform
+(`only installs when sys_platform == 'win32'`), not installed, or installed
+with metadata that reveals no import names. Saying so is the honest answer;
+"drop" would be a guess dressed as a finding.
+
+Every verdict shows the numbers behind it. There is no score to trust blindly.
+
+## Dependencies loaded by something else
+
+Some packages are never imported by your code because another package imports
+them for you -- a database driver reached through Django or SQLAlchemy is the
+usual case. `scant` finds most of these from installed metadata alone. For the
+rest, the only record is the other package's own source:
+
+    scant . --safe-to-scan-site-packages
+
+Off by default. It reads the source of packages you already import, runs only
+over dependencies already heading for `drop`, and reports what it finds with a
+file and line (`imported by django/db/backends/postgresql/base.py:26`). It
+never counts anything it reads there as your usage.
 
 ## License
 
