@@ -37,7 +37,7 @@ Then run `scant` against it, without installing `scant` at all:
     pipx install scant
     uv tool install scant     # same thing, if you already use uv
 
-`scant` is a tool, not a library -- you never import it. Installing it with
+`scant` is a tool, not a library. You never import it. Installing it with
 plain `pip` puts it inside whichever environment is active, which is usually
 the project venv it is about to read; `pipx` and `uv tool` keep it on `$PATH`
 and out of the way (and sidestep PEP 668's `externally-managed-environment`
@@ -86,29 +86,29 @@ Look at `css-inline`. PostHog carries an entire dependency for one line in one
 file. Thirty-seven of its 192 are like that.
 
 Nobody decides to do this. You need one function, the library has it, you add
-it, and then it sits there for years -- through every install, every audit,
+it, and then it sits there for years, through every install, every audit,
 every upgrade that has to wait for it. The cost isn't the disk space. It's that
 a dependency you use for one line still gets a vote on which Python you can run.
 
 ## What the verdicts mean
 
-**drop** -- declared, installed, and never imported. The only destructive
+**drop**: declared, installed, and never imported. The only destructive
 recommendation `scant` makes, so it requires positive proof the package is
 there and unused, never merely that nothing was found.
 
-**inline** -- used so little that copying the code in probably beats carrying
+**inline**: used so little that copying the code in probably beats carrying
 the dependency. This is the signal `scant` exists for; the `WHERE` column
 gives you the exact line.
 
-**keep** -- genuinely used.
+**keep**: genuinely used.
 
-**registered** -- never imported, but something loads it by name at runtime:
+**registered**: never imported, but something loads it by name at runtime.
 a SQLAlchemy dialect, a pytest plugin, a Django app in `INSTALLED_APPS`, a
 shell command, or a driver another package imports on your behalf. The
 `WHERE` column names the mechanism, so you can check the claim rather than
 take it.
 
-**unknown** -- `scant` can't judge it. Gated to another platform
+**unknown**: `scant` can't judge it. Gated to another platform
 (`only installs when sys_platform == 'win32'`), not installed, or installed
 with metadata that reveals no import names. Saying so is the honest answer;
 "drop" would be a guess dressed as a finding.
@@ -118,7 +118,7 @@ Every verdict shows the numbers behind it. There is no score to trust blindly.
 ## Dependencies loaded by something else
 
 Some packages are never imported by your code because another package imports
-them for you -- a database driver reached through Django or SQLAlchemy is the
+them for you. A database driver reached through Django or SQLAlchemy is the
 usual case. `scant` finds most of these from installed metadata alone. For the
 rest, the only record is the other package's own source:
 
@@ -132,7 +132,7 @@ never counts anything it reads there as your usage.
 ## Pointing at a different environment
 
 Usually you don't have to. `scant` looks at `$VIRTUAL_ENV`, `$CONDA_PREFIX`,
-then any `pyvenv.cfg`-marked folder under the scanned path -- so `.venv`,
+then any `pyvenv.cfg`-marked folder under the scanned path, so `.venv`,
 `venv`, `env`, `venv311` and friends are all found without being named.
 
 When that isn't what you want, `--env` takes a virtualenv, a conda prefix, a
@@ -144,7 +144,7 @@ bare site-packages folder, or a direct interpreter path:
 The interpreter form is the one for containers and CI images that install
 packages straight into a system Python, with no virtualenv at all.
 
-If nothing resolves -- or more than one folder looks like a venv -- `scant`
+If nothing resolves, or if more than one folder looks like a venv, `scant`
 says what it checked and how to point it at the right one, rather than
 guessing:
 
