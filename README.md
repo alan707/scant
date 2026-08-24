@@ -14,7 +14,20 @@ Written in rust ⚡️
 
 ## Install
 
+Try it without installing anything:
+
+    uvx scant .
+
+Or install it once and use it everywhere:
+
     pipx install scant
+    uv tool install scant     # same thing, if you already use uv
+
+`scant` is a tool, not a library -- you never import it. Installing it with
+plain `pip` puts it inside whichever environment is active, which is usually
+the project venv it is about to read; `pipx` and `uv tool` keep it on `$PATH`
+and out of the way (and sidestep PEP 668's `externally-managed-environment`
+on Homebrew and modern Linux distros).
 
 ## Usage
 
