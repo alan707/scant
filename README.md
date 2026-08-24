@@ -12,17 +12,27 @@ Built for plain English: flags are spelled out in full (`--threshold-lines`, not
 
 Written in rust ⚡️
 
-## Install
+## Try it out
 
-Try it without installing `scant` at all:
+`scant` reads your dependencies' installed metadata to map a declared name to
+what you actually import (`PyYAML` -> `yaml`), so it needs a project whose
+dependencies are installed in a virtual environment. If you're working on one,
+you already have that. If not, mkdocs is small and quick:
+
+    git clone --depth 1 https://github.com/mkdocs/mkdocs
+    cd mkdocs
+
+    uv venv                 # create .venv
+    uv pip install -e .     # install mkdocs's own dependencies into it
+
+Then run `scant` against it, without installing `scant` at all:
 
     uvx scant .
 
-(Your project's own dependencies do need to be installed in a venv -- `scant`
-reads their installed metadata to map a declared name to what you import. If
-you're working on the project, they already are.)
+    mkdocs -- 15 packages declared, 65 files read, 0.0s
+    Plan: drop 0, inline 4, unknown 3, keep 8.
 
-Or install it once and use it everywhere:
+## Install
 
     pipx install scant
     uv tool install scant     # same thing, if you already use uv
