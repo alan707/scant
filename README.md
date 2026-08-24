@@ -102,7 +102,7 @@ gives you the exact line.
 
 **keep**: genuinely used.
 
-**registered**: never imported, but something loads it by name at runtime.
+**registered**: never imported, but something loads it by name at runtime:
 a SQLAlchemy dialect, a pytest plugin, a Django app in `INSTALLED_APPS`, a
 shell command, or a driver another package imports on your behalf. The
 `WHERE` column names the mechanism, so you can check the claim rather than
