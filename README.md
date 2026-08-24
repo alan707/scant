@@ -42,9 +42,6 @@ plain `pip` puts it inside whichever environment is active, which is usually
 the project venv it is about to read; `pipx` and `uv tool` keep it on `$PATH`
 and out of the way.
 
-You can also run it in CI to confirm the dependencies you have are actually
-necessary.
-
 ## Usage
 
     scant .                      # the project in this folder
