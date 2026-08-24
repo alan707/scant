@@ -27,6 +27,7 @@ def main():
         "installed": int(os.environ.get("FT_INSTALLED", "0")),
         "install_attempted": int(os.environ.get("FT_ATTEMPTED", "0")),
         "scant_version": os.environ.get("FT_SCANT_VERSION", ""),
+        "scanned_site_packages": os.environ.get("FT_SCAN", "") == "true",
         "status": "ok",
     }
 

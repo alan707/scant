@@ -20,6 +20,13 @@ on:
       scant_version:
         description: PyPI version to test (blank = latest, pre-releases included)
         default: ''
+      scan_site_packages:
+        description: >
+          Pass --safe-to-scan-site-packages. Safe here in a way it isn't generally: each job
+          runs on an ephemeral runner whose venv holds nothing but this project's own
+          dependencies, so there is no unrelated environment to misread.
+        type: boolean
+        default: true
 
 concurrency:
   group: field-test-${{ github.ref }}
@@ -146,9 +153,11 @@ jobs:
       - name: Run scant
         env:
           NO_COLOR: '1'
+          SCAN_FLAG: ${{ inputs.scan_site_packages && '--safe-to-scan-site-packages' || '' }}
         run: |
           set +e
-          scant "$FT_TARGET" --env "$FT_TARGET/.venv" > "$RUNNER_TEMP/report.txt" 2>&1
+          # Unquoted on purpose: empty must expand to no argument at all, not to an empty one
+          scant "$FT_TARGET" --env "$FT_TARGET/.venv" $SCAN_FLAG > "$RUNNER_TEMP/report.txt" 2>&1
           echo "FT_EXIT=$?" >> "$GITHUB_ENV"
           set -e
           cat "$RUNNER_TEMP/report.txt"
@@ -158,6 +167,7 @@ jobs:
         env:
           FT_ID: ${{ matrix.id }}
           FT_REPO: ${{ matrix.repo }}
+          FT_SCAN: ${{ inputs.scan_site_packages }}
         run: |
           mkdir -p "$RUNNER_TEMP/results"
           python3 .github/scripts/field-test/parse_report.py \

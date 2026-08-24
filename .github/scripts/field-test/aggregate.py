@@ -40,7 +40,9 @@ def main():
 
     version = next((r["scant_version"] for r in rows if r.get("scant_version")), "scant")
     noun = "project" if len(rows) == 1 else "projects"
-    out = ["## scant field test", "", f"`{version}` against {len(rows)} real Python {noun}, smallest tree first.", ""]
+    # Named once at the top rather than per repo: it changes how every verdict below was reached.
+    scanned = " with `--safe-to-scan-site-packages`" if any(r.get("scanned_site_packages") for r in rows) else ""
+    out = ["## scant field test", "", f"`{version}`{scanned} against {len(rows)} real Python {noun}, smallest tree first.", ""]
 
     for row in rows:
         out.append(f"### [{row['repo']}](https://github.com/{row['repo']})")
