@@ -2,7 +2,7 @@
 //! results into per-dependency usage, and classifies each dependency as
 //! `drop` / `inline` / `keep`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -14,6 +14,7 @@ use crate::discover;
 use crate::manifest::{self, Dependency, ManifestError};
 use crate::namemap::{self, EntryPoints, NameMap, NameMapError};
 use crate::parse::{self, FileUsage};
+use crate::sitescan;
 use pep508_rs::MarkerEnvironment;
 
 #[derive(Debug, Clone, Copy)]
@@ -145,6 +146,7 @@ pub fn analyze(
     root: &Path,
     python_env: &Path,
     thresholds: Thresholds,
+    scan_site_packages: bool,
 ) -> Result<Report, AnalyzeError> {
     let start = Instant::now();
 
@@ -220,6 +222,10 @@ pub fn analyze(
         .collect();
     deps.sort_by(|a, b| a.name.cmp(&b.name));
 
+    if scan_site_packages {
+        explain_drops_from_installed_source(&mut deps, &name_map, &site_packages);
+    }
+
     Ok(Report {
         manifest_source_label: manifest.source.label(),
         files_scanned,
@@ -235,6 +241,40 @@ struct ProjectUsage<'a> {
     wildcard_roots: HashSet<String>,
     // Import roots the project actually uses, for deciding whether a distribution that provides an optional backend is itself in play.
     used_roots: HashSet<&'a str>,
+}
+
+// Runs only over dependencies already headed for `drop`, and only inside distributions the project imports, so a clean project pays nothing. See CLAUDE.md's rule that expensive-but-kind work runs on the suspect set, not the tree.
+fn explain_drops_from_installed_source(
+    deps: &mut [DepReport],
+    name_map: &NameMap,
+    site_packages: &Path,
+) {
+    let roots_of = |dep: &DepReport| {
+        name_map
+            .imports_for(&dep.name)
+            .into_iter()
+            .flatten()
+            .cloned()
+    };
+    let suspects: BTreeMap<String, PackageName> = deps
+        .iter()
+        .filter(|dep| dep.verdict == Verdict::Drop)
+        .flat_map(|dep| roots_of(dep).map(|root| (root, dep.name.clone())))
+        .collect();
+    // Only a package the project actually uses can be the thing loading a driver on its behalf. Without this the scan would excuse any dependency mentioned anywhere in site-packages.
+    let provider_roots: BTreeSet<String> = deps
+        .iter()
+        .filter(|dep| matches!(dep.verdict, Verdict::Keep | Verdict::Inline))
+        .flat_map(roots_of)
+        .collect();
+
+    let found = sitescan::find_importers(site_packages, &suspects, &provider_roots);
+    for dep in deps.iter_mut() {
+        if let Some(evidence) = found.get(&dep.name) {
+            dep.verdict = Verdict::Registered;
+            dep.registration = Some(evidence.clone());
+        }
+    }
 }
 
 fn build_dep_report(
@@ -691,7 +731,7 @@ mod tests {
         fs::write(installed.join("top_level.txt"), "win32api").unwrap();
         fs::write(root.join("main.py"), "print('nothing')\n").unwrap();
 
-        let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
+        let report = analyze(&root, &site_packages, Thresholds::default(), false).unwrap();
         let dep = report
             .deps
             .iter()
@@ -725,7 +765,7 @@ mod tests {
             .collect();
         fs::write(root.join("main.py"), heavy_use).unwrap();
 
-        let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
+        let report = analyze(&root, &site_packages, Thresholds::default(), false).unwrap();
         let feedgen = report
             .deps
             .iter()
@@ -763,7 +803,7 @@ mod tests {
         .unwrap();
         fs::write(root.join("main.py"), "print('nothing')\n").unwrap();
 
-        let dep = &analyze(&root, &site_packages, Thresholds::default())
+        let dep = &analyze(&root, &site_packages, Thresholds::default(), false)
             .unwrap()
             .deps[0];
 
@@ -795,7 +835,7 @@ mod tests {
         fs::write(click.join("top_level.txt"), "click").unwrap();
         fs::write(root.join("main.py"), "print('nothing')\n").unwrap();
 
-        let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
+        let report = analyze(&root, &site_packages, Thresholds::default(), false).unwrap();
         let dep = report
             .deps
             .iter()
@@ -857,7 +897,7 @@ mod tests {
         .unwrap();
         fs::write(root.join("main.py"), "print('no imports here')\n").unwrap();
 
-        let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
+        let report = analyze(&root, &site_packages, Thresholds::default(), false).unwrap();
         let dep = &report.deps[0];
 
         assert_eq!(dep.verdict, Verdict::Registered);
@@ -920,7 +960,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = analyze(&root, &site_packages, Thresholds::default()).unwrap();
+        let report = analyze(&root, &site_packages, Thresholds::default(), false).unwrap();
         assert_eq!(report.deps.len(), 3);
 
         let by_name = |name: &str| report.deps.iter().find(|d| d.display_name == name).unwrap();
@@ -948,7 +988,7 @@ mod tests {
             .join("site-packages");
         fs::create_dir_all(&site_packages).unwrap();
 
-        let report = analyze(&root, &python_env, Thresholds::default()).unwrap();
+        let report = analyze(&root, &python_env, Thresholds::default(), false).unwrap();
         assert!(
             report
                 .warnings
@@ -977,7 +1017,7 @@ mod tests {
         fs::create_dir_all(&pip_dist_info).unwrap();
         fs::write(pip_dist_info.join("top_level.txt"), "pip").unwrap();
 
-        let report = analyze(&root, &python_env, Thresholds::default()).unwrap();
+        let report = analyze(&root, &python_env, Thresholds::default(), false).unwrap();
         assert!(
             report
                 .warnings
@@ -994,7 +1034,7 @@ mod tests {
         let site_packages = root.join(".venv");
         fs::create_dir_all(&site_packages).unwrap();
 
-        let err = analyze(&root, &site_packages, Thresholds::default()).unwrap_err();
+        let err = analyze(&root, &site_packages, Thresholds::default(), false).unwrap_err();
         assert!(matches!(err, AnalyzeError::Manifest(_)));
 
         fs::remove_dir_all(&root).unwrap();
@@ -1010,7 +1050,7 @@ mod tests {
         .unwrap();
         let missing_env = root.join("does-not-exist");
 
-        let err = analyze(&root, &missing_env, Thresholds::default()).unwrap_err();
+        let err = analyze(&root, &missing_env, Thresholds::default(), false).unwrap_err();
         assert!(matches!(err, AnalyzeError::NameMap(_)));
 
         fs::remove_dir_all(&root).unwrap();

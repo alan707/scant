@@ -4,3 +4,4 @@ pub mod manifest;
 pub mod namemap;
 pub mod parse;
 pub mod report;
+pub mod sitescan;
