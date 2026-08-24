@@ -108,19 +108,36 @@ fn root_segment(dotted: &str) -> &str {
 }
 
 impl<'a> FileVisitor<'a> {
+    // A distribution under a PEP 420 namespace owns a dotted root (`google.protobuf`), so the
+    // longest known root wins: matching `google` instead would credit protobuf for every
+    // `google.cloud` import in the file. Falls back to the first segment, which is the right
+    // answer for every ordinary package and for anything not declared.
+    fn resolve_root(&self, dotted: &str) -> String {
+        let mut end = dotted.len();
+        loop {
+            if self.declared_roots.contains(&dotted[..end]) {
+                return dotted[..end].to_string();
+            }
+            match dotted[..end].rfind('.') {
+                Some(dot) => end = dot,
+                None => return root_segment(dotted).to_string(),
+            }
+        }
+    }
+
     fn handle_import(&mut self, stmt: &ast::StmtImport) {
         let mut roots_touched: HashSet<String> = HashSet::new();
         for alias in &stmt.names {
             let full_name = alias.name.as_str();
-            let root = root_segment(full_name).to_string();
-            if self.first_party.contains(&root) {
+            if self.first_party.contains(root_segment(full_name)) {
                 continue;
             }
+            let root = self.resolve_root(full_name);
             roots_touched.insert(root.clone());
             let bound_name = match &alias.asname {
                 Some(id) => id.as_str().to_string(),
-                // `import a.b.c` (no alias) binds only the top name `a`.
-                None => root.clone(),
+                // `import a.b.c` (no alias) binds only the top name `a` -- which is the first segment even when the root we attribute to is dotted.
+                None => root_segment(full_name).to_string(),
             };
             self.bindings.insert(
                 bound_name,
@@ -143,10 +160,10 @@ impl<'a> FileVisitor<'a> {
         let Some(module) = &stmt.module else {
             return;
         };
-        let root = root_segment(module.as_str()).to_string();
-        if self.first_party.contains(&root) {
+        if self.first_party.contains(root_segment(module.as_str())) {
             return;
         }
+        let root = self.resolve_root(module.as_str());
         self.records
             .entry(root.clone())
             .or_default()
@@ -421,6 +438,23 @@ mod tests {
         let record = &usage.records["numpy"];
         assert_eq!(record.import_statements, 1);
         assert_eq!(record.symbols, BTreeSet::from(["array".to_string()]));
+    }
+
+    #[test]
+    fn a_dotted_root_wins_over_its_namespace_prefix() {
+        let known = ["google.protobuf".to_string()].into_iter().collect();
+        let source = "from google.protobuf import json_format\nfrom google.cloud import storage\n\nx = json_format.Parse\ny = storage.Client\n";
+        let usage = analyze_source(Path::new("t.py"), source, &no_first_party(), &known).unwrap();
+
+        // protobuf is credited only for its own import; the sibling namespace package falls back to the bare first segment.
+        assert_eq!(usage.records["google.protobuf"].import_statements, 1);
+        assert_eq!(usage.records["google"].import_statements, 1);
+        assert!(
+            usage.records["google.protobuf"]
+                .symbols
+                .contains("json_format")
+        );
+        assert!(!usage.records["google.protobuf"].symbols.contains("storage"));
     }
 
     #[test]

@@ -4,6 +4,9 @@ All notable changes to `scant` are documented here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Fixed
+- Distributions shipping into a PEP 420 namespace package now resolve to their import names instead of none at all (#56). `read_record_full` accepted a RECORD path's first segment as an import root only when `site-packages/<segment>/__init__.py` existed, and a namespace root owns no `__init__.py` -- so `protobuf`, `opentelemetry-proto` and six `llama-index-*` packages resolved to nothing and were reported as `unknown`, "installed, but its import names couldn't be determined". A dependency scant cannot resolve is one it can never report on, so this was blindness rather than a wrong verdict. Two halves, because either alone would be wrong: resolution now descends until it reaches the directory that actually owns an `__init__.py` and takes the dotted path to it (`google.protobuf`, not `google`, bounded at three levels -- the deepest real nesting is `llama_index.embeddings.huggingface`), and the parser matches the *longest* known root, so `from google.protobuf import json_format` credits protobuf while `from google.cloud import storage` in the same file does not. Attributing at the shared namespace root instead would have traded a missing name for a wrong one: protobuf would read as heavily used the moment anything touched `google.cloud`. Both halves derive from what is on disk, per non-negotiable #10.
+
 ## [0.0.1a6]
 
 ### Added

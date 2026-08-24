@@ -432,6 +432,38 @@ fn read_extra_requirements(dist_info_dir: &Path) -> BTreeSet<PackageName> {
     found
 }
 
+// A PEP 420 namespace package owns no `__init__.py` at its namespace root: `google/` is shared
+// by protobuf, google-cloud-storage and googleapis-common-protos, and `llama_index/embeddings/`
+// by every llama-index embedding backend. So descend until a directory that does own one, and
+// take the dotted path to it -- `google.protobuf`, not `google`. Attributing at the namespace
+// root instead would credit every distribution beneath it for any `google.*` import, which is
+// worse than the missing name it replaces: protobuf would read as heavily used the moment
+// anything touched `google.cloud`.
+fn import_root_for(site_packages: &Path, path_field: &str) -> Option<String> {
+    // Three is the deepest nesting observed in the wild (`llama_index.embeddings.huggingface`), and the bound keeps a pathological RECORD from stat-ing its way down a deep tree.
+    const MAX_DEPTH: usize = 3;
+
+    let mut dir = site_packages.to_path_buf();
+    let mut dotted = String::new();
+    for segment in path_field.split('/').take(MAX_DEPTH) {
+        if segment.ends_with(".dist-info") || segment.ends_with(".data") {
+            return None;
+        }
+        dir.push(segment);
+        if !dir.is_dir() {
+            return None;
+        }
+        if !dotted.is_empty() {
+            dotted.push('.');
+        }
+        dotted.push_str(segment);
+        if dir.join("__init__.py").is_file() {
+            return Some(dotted);
+        }
+    }
+    None
+}
+
 // `.egg-info` dirnames are either `name-version` or a bare `name`, unlike `.dist-info` which always carries a version.
 fn package_name_from_metadata_dirname(dirname: &str) -> Option<PackageName> {
     let candidate = match dirname.rsplit_once('-') {
@@ -518,16 +550,9 @@ fn read_record_full(
             continue;
         }
         match path_field.split_once('/') {
-            Some((first_segment, _rest)) => {
-                if first_segment.ends_with(".dist-info") || first_segment.ends_with(".data") {
-                    continue;
-                }
-                if site_packages
-                    .join(first_segment)
-                    .join("__init__.py")
-                    .is_file()
-                {
-                    roots.insert(first_segment.to_string());
+            Some(_) => {
+                if let Some(root) = import_root_for(site_packages, path_field) {
+                    roots.insert(root);
                 }
             }
             None => {
@@ -885,6 +910,33 @@ mod tests {
         assert_eq!(found, ["psycopg", "psycopg2-binary", "pymssql"]);
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_namespace_package_resolves_to_its_dotted_root() {
+        let site = temp_dir("namespace-root");
+        let dist_info = site.join("protobuf-6.0.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        // protobuf's real shape: `google/` is a PEP 420 namespace shared with google-cloud-*, so only `google/protobuf/` owns an __init__.py.
+        fs::create_dir_all(site.join("google/protobuf/internal")).unwrap();
+        fs::write(site.join("google/protobuf/__init__.py"), "").unwrap();
+        fs::write(site.join("google/protobuf/internal/api.py"), "").unwrap();
+        fs::write(
+            dist_info.join("RECORD"),
+            "google/protobuf/__init__.py,sha256=a,1\ngoogle/protobuf/internal/api.py,sha256=b,2\n",
+        )
+        .unwrap();
+
+        let map = build(&site);
+        let protobuf = PackageName::new("protobuf".to_string()).unwrap();
+
+        assert_eq!(
+            map.imports_for(&protobuf)
+                .map(|roots| roots.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["google.protobuf".to_string()])
+        );
+
+        fs::remove_dir_all(&site).unwrap();
     }
 
     #[test]
