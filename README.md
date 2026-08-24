@@ -61,9 +61,8 @@ without failing on dependencies it merely can't judge.
 
 ## Example output
 
-Real output against a [PostHog](https://github.com/PostHog/posthog) checkout --
-192 declared dependencies across 19,340 Python files. Rows trimmed for length;
-nothing else changed.
+Here is [PostHog](https://github.com/PostHog/posthog): 192 dependencies,
+19,340 Python files, 2.9 seconds. Rows trimmed to fit.
 
     posthog -- 192 packages declared, 19340 files read, 2.9s
     Plan: drop 1, inline 37, registered 11, unknown 1, keep 142.
@@ -83,8 +82,13 @@ nothing else changed.
       keep        asgiref                      295   1690  heavy     ee/api/conversation.py +293 files
       keep        django-structlog               2      2  light     posthog/celery.py
 
-`css-inline` is the shape this tool is for: a whole dependency carried for one
-line in one file. Of 192 declared packages, 37 look like that.
+Look at `css-inline`. PostHog carries an entire dependency for one line in one
+file. Thirty-seven of its 192 are like that.
+
+Nobody decides to do this. You need one function, the library has it, you add
+it, and then it sits there for years -- through every install, every audit,
+every upgrade that has to wait for it. The cost isn't the disk space. It's that
+a dependency you use for one line still gets a vote on which Python you can run.
 
 ## What the verdicts mean
 
