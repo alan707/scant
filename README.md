@@ -66,19 +66,30 @@ rather than guessing:
 
 ## Example output
 
-    mkdocs -- 15 packages declared, 65 files read, 0.1s
-    Plan: drop 0, inline 4, unknown 3, keep 8.
+Real output against a [PostHog](https://github.com/PostHog/posthog) checkout --
+192 declared dependencies across 19,340 Python files. Rows trimmed for length;
+nothing else changed.
 
-      ACTION   PACKAGE             USES  LINES  USE       WHERE
-      inline   markupsafe             1      1  trivial   mkdocs/utils/templates.py:55
-      inline   mergedeep              1      1  trivial   mkdocs/utils/yaml.py:149
-      inline   pyyaml_env_tag         1      1  trivial   mkdocs/utils/yaml.py:120
+    posthog -- 192 packages declared, 19340 files read, 2.9s
+    Plan: drop 1, inline 37, registered 11, unknown 1, keep 142.
 
-      unknown  babel                  0      0  none      declared, but not installed in this environment
-      unknown  colorama               0      0  none      only installs when platform_system == 'Windows'
+      ACTION      PACKAGE                     USES  LINES  USE       WHERE
+      drop        dagster-cloud                  0      0  none      --
 
-      keep     click                  4     41  heavy     mkdocs/__main__.py +3 files
-      keep     watchdog               2      2  light     mkdocs/livereload/__init__.py
+      inline      css-inline                     1      1  trivial   posthog/email.py:46
+      inline      django-cors-headers            1      1  trivial   posthog/settings/web.py:275
+      inline      disposable-email-domains       2      2  trivial   posthog/models/integration/email.py:44
+
+      registered  dagster-celery                 0      0  none      console_scripts: dagster-celery
+      registered  celery-redbeat                 0      0  none      named as a string in posthog/management/commands/run_autoreload_celery.py:34
+
+      unknown     tbb                            0      0  none      only installs when platform_machine == 'x86_64' and sys_platform == 'linux'
+
+      keep        asgiref                      295   1690  heavy     ee/api/conversation.py +293 files
+      keep        django-structlog               2      2  light     posthog/celery.py
+
+`css-inline` is the shape this tool is for: a whole dependency carried for one
+line in one file. Of 192 declared packages, 37 look like that.
 
 ## What the verdicts mean
 
