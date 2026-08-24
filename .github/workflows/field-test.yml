@@ -166,7 +166,13 @@ jobs:
         run: |
           # Clone under the repo's own name: scant titles its report after the directory it scanned, and "target" would make every report in the summary anonymous
           target="$RUNNER_TEMP/${REPO##*/}"
-          git clone --depth 1 "https://github.com/$REPO" "$target"
+          # Retried: a mid-clone "fetch-pack: unexpected disconnect" is a transport hiccup, and without this it surfaces in the summary as though scant had failed on the repo.
+          for attempt in 1 2 3; do
+            rm -rf "$target"
+            git clone --depth 1 "https://github.com/$REPO" "$target" && break
+            echo "clone attempt $attempt failed, retrying"
+          done
+          test -d "$target" || { echo "::error::could not clone $REPO"; exit 1; }
           echo "FT_TARGET=$target" >> "$GITHUB_ENV"
 
       - name: Install the target's declared dependencies

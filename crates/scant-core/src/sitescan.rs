@@ -40,6 +40,9 @@ pub fn find_importers(
         .flat_map(|root| python_files(&site_packages.join(root)))
         .collect();
 
+    // The suspect roots double as the known-root set: a dotted root like `google.protobuf` only resolves if the parser is told it exists.
+    let known_roots: HashSet<String> = suspects.keys().cloned().collect();
+
     let mut hits: Vec<(PackageName, String)> = files
         .par_iter()
         .filter_map(|path| {
@@ -48,7 +51,7 @@ pub fn find_importers(
             if !suspects.keys().any(|root| source.contains(root.as_str())) {
                 return None;
             }
-            let usage = parse::analyze_source(path, &source, &HashSet::new(), &HashSet::new())?;
+            let usage = parse::analyze_source(path, &source, &HashSet::new(), &known_roots)?;
             let relative = path
                 .strip_prefix(site_packages)
                 .unwrap_or(path)
