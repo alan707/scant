@@ -4,6 +4,14 @@ All notable changes to `scant` are documented here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.0.1]
+
+First release outside the alpha series. `scant` installs without `--pre` from here, so its verdicts are what a user gets by default.
+
+Validated against eleven real repositories -- posthog, sentry, open-webui, odoo, jumpserver, saleor, MetaGPT, authentik, paperless-ngx, mlflow, InvokeAI -- spanning 256 to 19,340 Python files. The largest of them scans in 2.9 seconds. Across the set, false `drop` verdicts fell from 144 to 35 over the `a5`-`a6` series, and the 35 that remain are dependencies genuinely absent from their project's source.
+
+Known limitations, each with a filed issue and each visible in the output rather than silent: a hand-flattened manifest still produces one row per transitive pin instead of one observation about the manifest; `types-*` stub distributions are reported as unused because nothing imports them at runtime; `.egg-info` metadata is recognized but not parsed (#40); and a dependency reached only through `importlib` with a computed name cannot be detected (#49).
+
 ### Fixed
 - Distributions shipping into a PEP 420 namespace package now resolve to their import names instead of none at all (#56). `read_record_full` accepted a RECORD path's first segment as an import root only when `site-packages/<segment>/__init__.py` existed, and a namespace root owns no `__init__.py` -- so `protobuf`, `opentelemetry-proto` and six `llama-index-*` packages resolved to nothing and were reported as `unknown`, "installed, but its import names couldn't be determined". A dependency scant cannot resolve is one it can never report on, so this was blindness rather than a wrong verdict. Two halves, because either alone would be wrong: resolution now descends until it reaches the directory that actually owns an `__init__.py` and takes the dotted path to it (`google.protobuf`, not `google`, bounded at three levels -- the deepest real nesting is `llama_index.embeddings.huggingface`), and the parser matches the *longest* known root, so `from google.protobuf import json_format` credits protobuf while `from google.cloud import storage` in the same file does not. Attributing at the shared namespace root instead would have traded a missing name for a wrong one: protobuf would read as heavily used the moment anything touched `google.cloud`. Both halves derive from what is on disk, per non-negotiable #10.
 
