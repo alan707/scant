@@ -14,9 +14,13 @@ Written in rust ⚡️
 
 ## Install
 
-Try it without installing anything:
+Try it without installing `scant` at all:
 
     uvx scant .
+
+(Your project's own dependencies do need to be installed in a venv -- `scant`
+reads their installed metadata to map a declared name to what you import. If
+you're working on the project, they already are.)
 
 Or install it once and use it everywhere:
 
