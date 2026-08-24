@@ -45,10 +45,9 @@ on Homebrew and modern Linux distros).
 
 ## Usage
 
-    scant .
-    scant . --threshold-lines 5
-    scant . --env path/to/venv
-    scant . --env path/to/venv/bin/python
+    scant .                      # the project in this folder
+    scant path/to/project
+    scant . --threshold-lines 5  # widen what counts as barely used
 
 A dependency is "barely used" when it stays under *all three* thresholds:
 `--threshold-lines` (default 3), `--threshold-files` (2), and
@@ -59,37 +58,6 @@ Exit codes: `0` nothing to act on, `1` findings, `2` something went wrong
 (no manifest, no Python environment). `registered` and `unknown` are not
 findings and don't affect the exit code, so `scant .` works as a CI gate
 without failing on dependencies it merely can't judge.
-
-`scant` needs to read your dependencies' *installed* metadata to map a declared
-name to what you actually import (e.g. `PyYAML` -> `yaml`) -- there's no
-reliable way to do that without them being installed somewhere. It looks, in
-order, at: `--env` if you passed it, `$VIRTUAL_ENV`, `$CONDA_PREFIX`, then any
-`pyvenv.cfg`-marked folder under the scanned path (so `.venv`, `venv`, `env`,
-`venv311`, etc. are all found automatically -- no need to name it right).
-`--env` also accepts a direct interpreter path, not just a directory
-(`--env .venv/bin/python`), which is handy inside containers or CI images
-that install packages straight into a system Python.
-
-If none of that resolves -- or more than one folder looks like a venv --
-`scant` explains what it checked and how to point it at the right one,
-rather than guessing:
-
-    $ scant .
-    Couldn't find a Python environment for this project.
-
-    scant needs to read your dependencies' installed metadata to map declared
-    names to imports (e.g. "PyYAML" -> "yaml") -- there's no reliable way to
-    do that without them actually being installed somewhere.
-
-    Checked:
-      ├── $VIRTUAL_ENV   not set
-      ├── $CONDA_PREFIX  not set
-      └── ./   no .venv, venv, or other pyvenv.cfg-marked folder
-
-    To fix this:
-      1. Activate a virtualenv with your dependencies installed, then re-run scant
-      2. Or point at one directly:    scant . --env path/to/venv
-      3. Or point at an interpreter:  scant . --env path/to/venv/bin/python
 
 ## Example output
 
@@ -156,6 +124,42 @@ Off by default. It reads the source of packages you already import, runs only
 over dependencies already heading for `drop`, and reports what it finds with a
 file and line (`imported by django/db/backends/postgresql/base.py:26`). It
 never counts anything it reads there as your usage.
+
+## Pointing at a different environment
+
+Usually you don't have to. `scant` looks at `$VIRTUAL_ENV`, `$CONDA_PREFIX`,
+then any `pyvenv.cfg`-marked folder under the scanned path -- so `.venv`,
+`venv`, `env`, `venv311` and friends are all found without being named.
+
+When that isn't what you want, `--env` takes a virtualenv, a conda prefix, a
+bare site-packages folder, or a direct interpreter path:
+
+    scant . --env path/to/venv
+    scant . --env path/to/venv/bin/python
+
+The interpreter form is the one for containers and CI images that install
+packages straight into a system Python, with no virtualenv at all.
+
+If nothing resolves -- or more than one folder looks like a venv -- `scant`
+says what it checked and how to point it at the right one, rather than
+guessing:
+
+    $ scant .
+    Couldn't find a Python environment for this project.
+
+    scant needs to read your dependencies' installed metadata to map declared
+    names to imports (e.g. "PyYAML" -> "yaml") -- there's no reliable way to
+    do that without them actually being installed somewhere.
+
+    Checked:
+      ├── $VIRTUAL_ENV   not set
+      ├── $CONDA_PREFIX  not set
+      └── ./   no .venv, venv, or other pyvenv.cfg-marked folder
+
+    To fix this:
+      1. Activate a virtualenv with your dependencies installed, then re-run scant
+      2. Or point at one directly:    scant . --env path/to/venv
+      3. Or point at an interpreter:  scant . --env path/to/venv/bin/python
 
 ## License
 
