@@ -22,6 +22,15 @@ struct Cli {
     #[arg(long, alias = "python")]
     env: Option<PathBuf>,
 
+    /// Read installed packages' source to explain dependencies that look
+    /// unused. Off by default: scanning site-packages risks reading a
+    /// dependency's own imports as your usage, so scant never does it
+    /// unasked. When on, it runs only over dependencies already headed for
+    /// "drop", and only inside packages you actually import -- enough to
+    /// catch a database driver that Django imports on your behalf.
+    #[arg(long)]
+    safe_to_scan_site_packages: bool,
+
     /// Flag dependencies used on N or fewer lines
     #[arg(long, default_value_t = 3)]
     threshold_lines: u32,
@@ -59,7 +68,12 @@ fn main() -> ExitCode {
         symbols: cli.threshold_symbols,
     };
 
-    let analysis = match analyze::analyze(&cli.path, &python_env, thresholds) {
+    let analysis = match analyze::analyze(
+        &cli.path,
+        &python_env,
+        thresholds,
+        cli.safe_to_scan_site_packages,
+    ) {
         Ok(report) => report,
         Err(e) => {
             eprintln!("{e}");
