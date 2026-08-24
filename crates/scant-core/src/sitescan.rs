@@ -132,9 +132,19 @@ mod tests {
             &BTreeSet::from(["django".to_string()]),
         );
 
+        // Built from a Path rather than written out: the evidence carries native separators, the same as every other path in the report.
+        let expected = format!(
+            "imported by {}:6",
+            Path::new("django")
+                .join("db")
+                .join("backends")
+                .join("postgresql")
+                .join("base.py")
+                .display()
+        );
         assert_eq!(
             found.get(&PackageName::new("psycopg".to_string()).unwrap()),
-            Some(&"imported by django/db/backends/postgresql/base.py:6".to_string())
+            Some(&expected)
         );
         fs::remove_dir_all(&site).unwrap();
     }
