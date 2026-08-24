@@ -40,8 +40,10 @@ Then run `scant` against it, without installing `scant` at all:
 `scant` is a tool, not a library. You never import it. Installing it with
 plain `pip` puts it inside whichever environment is active, which is usually
 the project venv it is about to read; `pipx` and `uv tool` keep it on `$PATH`
-and out of the way (and sidestep PEP 668's `externally-managed-environment`
-on Homebrew and modern Linux distros).
+and out of the way.
+
+You can also run it as a Github Action to confirm the dependencies you have are
+actually necessary.
 
 ## Usage
 
@@ -51,8 +53,8 @@ on Homebrew and modern Linux distros).
 
 A dependency is "barely used" when it stays under *all three* thresholds:
 `--threshold-lines` (default 3), `--threshold-files` (2), and
-`--threshold-symbols` (1). One symbol imported on two lines of one file is a
-candidate to inline; the same symbol used across nine files is not.
+`--threshold-symbols` (1). A candidate to inline is one that has max 3 lines
+of code and could be potentially blocking you from upgrading python versions.
 
 Exit codes: `0` nothing to act on, `1` findings, `2` something went wrong
 (no manifest, no Python environment). `registered` and `unknown` are not
@@ -61,8 +63,8 @@ without failing on dependencies it merely can't judge.
 
 ## Example output
 
-Here is [PostHog](https://github.com/PostHog/posthog): 192 dependencies,
-19,340 Python files, 2.9 seconds. Rows trimmed to fit.
+Here is [PostHog](https://github.com/PostHog/posthog): It has 192 dependencies,
+19,340 Python files. It only took 2.9s to run!
 
     posthog -- 192 packages declared, 19340 files read, 2.9s
     Plan: drop 1, inline 37, registered 11, unknown 1, keep 142.
@@ -83,37 +85,30 @@ Here is [PostHog](https://github.com/PostHog/posthog): 192 dependencies,
       keep        django-structlog               2      2  light     posthog/celery.py
 
 Look at `css-inline`. PostHog carries an entire dependency for one line in one
-file. Thirty-seven of its 192 are like that.
-
-Nobody decides to do this. You need one function, the library has it, you add
-it, and then it sits there for years, through every install, every audit,
-every upgrade that has to wait for it. The cost isn't the disk space. It's that
-a dependency you use for one line still gets a vote on which Python you can run.
+file.  This is why `scant` recommends removing that dependency and adding the underlying
+code into the repo.
 
 ## What the verdicts mean
 
-**drop**: declared, installed, and never imported. The only destructive
-recommendation `scant` makes, so it requires positive proof the package is
-there and unused, never merely that nothing was found.
+**drop**: declared but and never imported. The only destructive
+recommendation `scant` makes. This is similar to other python dependency
+finders.
 
-**inline**: used so little that copying the code in probably beats carrying
-the dependency. This is the signal `scant` exists for; the `WHERE` column
-gives you the exact line.
+**inline**: used so little that copying the code into your codebase probably 
+makes more sense that using another dependency. 
+This is the whole reason signal `scant` exists and what separates 
 
 **keep**: genuinely used.
 
 **registered**: never imported, but something loads it by name at runtime:
 a SQLAlchemy dialect, a pytest plugin, a Django app in `INSTALLED_APPS`, a
-shell command, or a driver another package imports on your behalf. The
-`WHERE` column names the mechanism, so you can check the claim rather than
-take it.
+shell command, or a driver another package imports on your behalf. 
 
-**unknown**: `scant` can't judge it. Gated to another platform
-(`only installs when sys_platform == 'win32'`), not installed, or installed
-with metadata that reveals no import names. Saying so is the honest answer;
-"drop" would be a guess dressed as a finding.
+**unknown**: `scant` can't judge it because it doesn't have the right OS or 
+platform (`only installs when sys_platform == 'win32'`), not installed, or installed
+with metadata that reveals no import names. 
 
-Every verdict shows the numbers behind it. There is no score to trust blindly.
+Every verdict shows the numbers behind it. 
 
 ## Dependencies loaded by something else
 
@@ -124,16 +119,15 @@ rest, the only record is the other package's own source:
 
     scant . --safe-to-scan-site-packages
 
-Off by default. It reads the source of packages you already import, runs only
-over dependencies already heading for `drop`, and reports what it finds with a
-file and line (`imported by django/db/backends/postgresql/base.py:26`). It
-never counts anything it reads there as your usage.
+Off by default because you might be running `scant` in an environment with random
+dependencies installed. If you know the site-packages are the ones form the repo,
+you can use that flag.
 
 ## Pointing at a different environment
 
 Usually you don't have to. `scant` looks at `$VIRTUAL_ENV`, `$CONDA_PREFIX`,
 then any `pyvenv.cfg`-marked folder under the scanned path, so `.venv`,
-`venv`, `env`, `venv311` and friends are all found without being named.
+`venv`, `env`, `venv311` etc are all found without being named.
 
 When that isn't what you want, `--env` takes a virtualenv, a conda prefix, a
 bare site-packages folder, or a direct interpreter path:
