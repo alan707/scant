@@ -130,7 +130,7 @@ jobs:
             libpq-dev libxml2-dev libxslt1-dev libffi-dev libssl-dev zlib1g-dev libjpeg-dev \
             $EXTRA_APT
 
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
 
       - name: Install scant from PyPI
         if: inputs.scant_source == 'pypi'
